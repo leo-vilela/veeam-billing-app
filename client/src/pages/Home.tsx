@@ -1,25 +1,63 @@
-import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
-import { Streamdown } from 'streamdown';
+import { useState } from "react";
+import { toast } from "sonner";
+import ConfigurationPage from "./ConfigurationPage";
+import BillingDashboard from "./BillingDashboard";
+import { VeeamConfig, BillingData } from "@/types/veeam";
+import { fetchBillingData } from "@/lib/veeamApi";
 
-/**
- * All content in this page are only for example, replace with your own feature implementation
- * When building pages, remember your instructions in Frontend Best Practices, Design Guide and Common Pitfalls
- */
 export default function Home() {
-  // If theme is switchable in App.tsx, we can implement theme toggling like this:
-  // const { theme, toggleTheme } = useTheme();
+  const [currentPage, setCurrentPage] = useState<"config" | "dashboard">("config");
+  const [billingData, setBillingData] = useState<BillingData | null>(null);
+  const [config, setConfig] = useState<VeeamConfig | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleConfigSubmit = async (formConfig: VeeamConfig) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      toast.loading("Conectando à API do Veeam...");
+      const data = await fetchBillingData(formConfig);
+      setBillingData(data);
+      setConfig(formConfig);
+      setCurrentPage("dashboard");
+      toast.dismiss();
+      toast.success("Dados carregados com sucesso!");
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error ? err.message : "Erro desconhecido";
+      setError(errorMessage);
+      toast.dismiss();
+      toast.error(`Erro: ${errorMessage}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleReset = () => {
+    setCurrentPage("config");
+    setBillingData(null);
+    setConfig(null);
+    setError(null);
+  };
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <main>
-        {/* Example: lucide-react for icons */}
-        <Loader2 className="animate-spin" />
-        Example Page
-        {/* Example: Streamdown for markdown rendering */}
-        <Streamdown>Any **markdown** content</Streamdown>
-        <Button variant="default">Example Button</Button>
-      </main>
+    <div className="min-h-screen">
+      {currentPage === "config" ? (
+        <ConfigurationPage
+          onConfigSubmit={handleConfigSubmit}
+          isLoading={isLoading}
+          error={error || undefined}
+        />
+      ) : billingData && config ? (
+        <BillingDashboard
+          billingData={billingData}
+          config={config}
+          onReset={handleReset}
+          isLoading={isLoading}
+        />
+      ) : null}
     </div>
   );
 }
