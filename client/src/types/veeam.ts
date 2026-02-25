@@ -31,6 +31,26 @@ export interface VeeamVM {
   jobUid: string;
 }
 
+export interface VeeamComputer {
+  computerUid?: string;
+  name: string;
+  platform?: string;
+  usedSourceSizeBytes: number;
+  lastProtectedDate?: string;
+  jobName?: string;
+  jobUid?: string;
+}
+
+export interface VeeamFileShare {
+  fileShareUid?: string;
+  name: string;
+  platform?: string;
+  usedSourceSizeBytes: number;
+  lastProtectedDate?: string;
+  jobName?: string;
+  jobUid?: string;
+}
+
 export interface VeeamBackup {
   backupUid?: string;
   vmName: string;
@@ -39,16 +59,38 @@ export interface VeeamBackup {
   status: string;
 }
 
+export interface VeeamLicensingUsage {
+  instances?: number;
+  sockets?: number;
+  capacityBytes?: number;
+  [key: string]: any;
+}
+
 export interface BillingData {
   jobs: VeeamJob[];
   vms: VeeamVM[];
+  computers: VeeamComputer[];
+  fileShares: VeeamFileShare[];
   backups: VeeamBackup[];
   totalVolumeBytes: number;
   jobCount: number;
   vmCount: number;
+  computerCount: number;
+  fileShareCount: number;
   backupCount: number;
   periodStart: string;
   periodEnd: string;
+  billingMode?: "v22" | "legacy-license";
+  licensingUsage?: VeeamLicensingUsage;
+  legacySummary?: {
+    instances: number;
+    sockets: number;
+    licenseType?: string;
+    expirationDate?: string;
+    supportExpirationDate?: string;
+    product?: string;
+    version?: string;
+  };
 }
 
 export interface ApiResponse<T> {

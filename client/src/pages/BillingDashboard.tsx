@@ -3,6 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   BarChart,
   Bar,
@@ -25,6 +28,8 @@ import {
   DollarSign,
   Download,
   RotateCcw,
+  Monitor,
+  Folder,
 } from "lucide-react";
 import { BillingData, VeeamConfig } from "@/types/veeam";
 import { formatBytes, calculateBilling } from "@/lib/veeamApi";
@@ -42,9 +47,13 @@ export default function BillingDashboard({
   onReset,
   isLoading = false,
 }: BillingDashboardProps) {
-  const [pricePerGB, setPricePerGB] = useState(0.05);
+  const [unitPrice, setUnitPrice] = useState(0.05);
+  const isLegacyLicenseMode = billingData.billingMode === "legacy-license";
+  const licenseInstances = billingData.legacySummary?.instances ?? 0;
 
-  const totalCost = calculateBilling(billingData.totalVolumeBytes, pricePerGB);
+  const totalCost = isLegacyLicenseMode
+    ? licenseInstances * unitPrice
+    : calculateBilling(billingData.totalVolumeBytes, unitPrice);
   const totalGB = billingData.totalVolumeBytes / (1024 * 1024 * 1024);
 
   // Dados para gráfico de jobs
@@ -78,13 +87,59 @@ export default function BillingDashboard({
 
   const COLORS = ["#10b981", "#f59e0b", "#ef4444"];
 
+  // Consolidação de backups agrupado por Job
+  const jobGroups = (() => {
+    const map = new Map<string, {
+      jobName: string;
+      vms: { name: string; usedSourceSizeBytes: number; backupCount: number }[];
+      totalBytes: number;
+      totalBackups: number;
+    }>();
+
+    // Agrupar VMs por jobName
+    for (const vm of billingData.vms) {
+      const jobKey = vm.jobName || "Sem Job";
+      const existing = map.get(jobKey);
+      const vmBackups = billingData.backups.filter(b => b.vmName === vm.name);
+      const vmEntry = {
+        name: vm.name,
+        usedSourceSizeBytes: vm.usedSourceSizeBytes || 0,
+        backupCount: vmBackups.length,
+      };
+      if (existing) {
+        existing.vms.push(vmEntry);
+        existing.totalBytes += vmEntry.usedSourceSizeBytes;
+        existing.totalBackups += vmEntry.backupCount;
+      } else {
+        map.set(jobKey, {
+          jobName: jobKey,
+          vms: [vmEntry],
+          totalBytes: vmEntry.usedSourceSizeBytes,
+          totalBackups: vmEntry.backupCount,
+        });
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => b.totalBytes - a.totalBytes);
+  })();
+
+  const grandTotalBytes = jobGroups.reduce((sum, g) => sum + g.totalBytes, 0);
+  const grandTotalBackups = jobGroups.reduce((sum, g) => sum + g.totalBackups, 0);
+  const grandTotalVMs = jobGroups.reduce((sum, g) => sum + g.vms.length, 0);
+
   const handleExportCSV = () => {
     let csv = "Relatório de Cobrança Veeam\n";
     csv += `Período: ${config.startDate} a ${config.endDate}\n\n`;
     csv += `Total de Jobs,${billingData.jobCount}\n`;
     csv += `Total de VMs,${billingData.vmCount}\n`;
+    csv += `Total de Computadores,${billingData.computerCount || 0}\n`;
+    csv += `Total de File Shares,${billingData.fileShareCount || 0}\n`;
     csv += `Total de Backups,${billingData.backupCount}\n`;
-    csv += `Volume Total,${formatBytes(billingData.totalVolumeBytes)}\n`;
+    csv += isLegacyLicenseMode
+      ? `Instâncias Licenciadas,${licenseInstances}\n`
+      : `Volume Total,${formatBytes(billingData.totalVolumeBytes)}\n`;
+    csv += isLegacyLicenseMode
+      ? `Preço por Instância (R$),${unitPrice.toFixed(2)}\n`
+      : `Preço por GB (R$),${unitPrice.toFixed(2)}\n`;
     csv += `Custo Estimado (R$),${totalCost.toFixed(2)}\n\n`;
 
     csv += "Jobs\n";
@@ -97,6 +152,18 @@ export default function BillingDashboard({
     csv += "Nome,Plataforma,Tamanho Usado,Data Última Proteção\n";
     billingData.vms.forEach((vm) => {
       csv += `"${vm.name}",${vm.platform},${formatBytes(vm.usedSourceSizeBytes)},${vm.lastProtectedDate}\n`;
+    });
+
+    csv += "\nComputadores (Agents)\n";
+    csv += "Nome,Sistema,Tamanho Usado,Data Última Proteção\n";
+    (billingData.computers || []).forEach((c) => {
+      csv += `"${c.name}",${c.platform || "N/A"},${formatBytes(c.usedSourceSizeBytes)},${c.lastProtectedDate || "N/A"}\n`;
+    });
+
+    csv += "\nFile Shares\n";
+    csv += "Nome,Tipo,Tamanho Usado,Data Última Proteção\n";
+    (billingData.fileShares || []).forEach((fs) => {
+      csv += `"${fs.name}",${fs.platform || "N/A"},${formatBytes(fs.usedSourceSizeBytes)},${fs.lastProtectedDate || "N/A"}\n`;
     });
 
     const element = document.createElement("a");
@@ -147,18 +214,41 @@ export default function BillingDashboard({
 
       {/* Main Content */}
       <div className="container py-8">
+        {isLegacyLicenseMode && (
+          <Alert className="mb-4">
+            <AlertDescription>
+              Billing calculado por licenciamento legado (instâncias). Jobs/VMs/backups detalhados não estão disponíveis nesta API. Instâncias: {licenseInstances}
+              {billingData.legacySummary?.licenseType
+                ? ` | Tipo: ${billingData.legacySummary.licenseType}`
+                : ""}
+              {billingData.legacySummary?.product && billingData.legacySummary?.version
+                ? ` | Produto: ${billingData.legacySummary.product} ${billingData.legacySummary.version}`
+                : ""}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {billingData.licensingUsage && (
+          <Alert className="mb-4 bg-primary/10 border-primary/20">
+            <AlertDescription>
+              <span className="font-semibold block mb-1">Dados de Licenciamento (API v2.2):</span>
+              <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(billingData.licensingUsage, null, 2)}</pre>
+            </AlertDescription>
+          </Alert>
+        )}
+
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 mb-8">
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Total de Jobs
+                {isLegacyLicenseMode ? "Jobs (indisponível)" : "Total de Jobs"}
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="text-3xl font-bold">
-                  {billingData.jobCount}
+                  {isLegacyLicenseMode ? "-" : billingData.jobCount}
                 </div>
                 <Zap className="h-8 w-8 text-primary/60" />
               </div>
@@ -168,13 +258,13 @@ export default function BillingDashboard({
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Total de VMs
+                {isLegacyLicenseMode ? "Instâncias Licenciadas" : "Total de VMs"}
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="text-3xl font-bold">
-                  {billingData.vmCount}
+                  {isLegacyLicenseMode ? licenseInstances : billingData.vmCount}
                 </div>
                 <Server className="h-8 w-8 text-primary/60" />
               </div>
@@ -184,13 +274,45 @@ export default function BillingDashboard({
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Volume Total
+                Total de Computadores
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div className="text-3xl font-bold">
+                  {billingData.computerCount || 0}
+                </div>
+                <Monitor className="h-8 w-8 text-primary/60" />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                Total de File Shares
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center justify-between">
+                <div className="text-3xl font-bold">
+                  {billingData.fileShareCount || 0}
+                </div>
+                <Folder className="h-8 w-8 text-primary/60" />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm font-medium text-muted-foreground">
+                {isLegacyLicenseMode ? "Unidades Faturáveis" : "Volume Total"}
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
                 <div className="text-2xl font-bold">
-                  {totalGB.toFixed(2)} GB
+                  {isLegacyLicenseMode ? `${totalGB.toFixed(0)} instâncias` : `${totalGB.toFixed(2)} GB`}
                 </div>
                 <HardDrive className="h-8 w-8 text-primary/60" />
               </div>
@@ -210,6 +332,27 @@ export default function BillingDashboard({
                 </div>
                 <DollarSign className="h-8 w-8 text-primary/60" />
               </div>
+              <div className="mt-3 space-y-2">
+                <Label htmlFor="unitPrice" className="text-xs text-muted-foreground">
+                  {isLegacyLicenseMode ? "Preço por instância (R$)" : "Preço por GB (R$)"}
+                </Label>
+                <Input
+                  id="unitPrice"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={Number.isFinite(unitPrice) ? unitPrice : 0}
+                  onChange={(e) => {
+                    const parsed = Number(e.target.value);
+                    setUnitPrice(Number.isFinite(parsed) ? parsed : 0);
+                  }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                {isLegacyLicenseMode
+                  ? `Base: R$ ${unitPrice.toFixed(2)} por instância`
+                  : `Base: R$ ${unitPrice.toFixed(2)} por GB`}
+              </p>
             </CardContent>
           </Card>
         </div>
@@ -220,7 +363,9 @@ export default function BillingDashboard({
             <TabsTrigger value="overview">Visão Geral</TabsTrigger>
             <TabsTrigger value="jobs">Jobs</TabsTrigger>
             <TabsTrigger value="vms">VMs</TabsTrigger>
-            <TabsTrigger value="backups">Backups</TabsTrigger>
+            <TabsTrigger value="computers">Computadores</TabsTrigger>
+            <TabsTrigger value="fileshares">File Shares</TabsTrigger>
+            <TabsTrigger value="backups">Backups Consolidado</TabsTrigger>
           </TabsList>
 
           {/* Overview Tab */}
@@ -402,13 +547,13 @@ export default function BillingDashboard({
             </Card>
           </TabsContent>
 
-          {/* Backups Tab */}
-          <TabsContent value="backups">
+          {/* Computers Tab */}
+          <TabsContent value="computers">
             <Card>
               <CardHeader>
-                <CardTitle>Histórico de Backups</CardTitle>
+                <CardTitle>Lista de Computadores Protegidos</CardTitle>
                 <CardDescription>
-                  Total de {billingData.backupCount} backups realizados
+                  Total de {billingData.computerCount || 0} Veeam Agents
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -416,44 +561,150 @@ export default function BillingDashboard({
                   <table className="w-full text-sm">
                     <thead className="border-b">
                       <tr>
-                        <th className="text-left py-2 px-2">VM</th>
-                        <th className="text-left py-2 px-2">Data do Backup</th>
-                        <th className="text-left py-2 px-2">Status</th>
-                        <th className="text-right py-2 px-2">Tamanho</th>
+                        <th className="text-left py-2 px-2">Nome</th>
+                        <th className="text-left py-2 px-2">Sistema</th>
+                        <th className="text-left py-2 px-2">Job</th>
+                        <th className="text-right py-2 px-2">Tamanho Usado</th>
+                        <th className="text-left py-2 px-2">Última Proteção</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {billingData.backups.slice(0, 50).map((backup, idx) => (
-                        <tr key={idx} className="border-b hover:bg-muted/50">
-                          <td className="py-2 px-2 font-medium">
-                            {backup.vmName}
-                          </td>
+                      {(billingData.computers || []).map((comp, idx) => (
+                        <tr key={comp.computerUid || idx} className="border-b hover:bg-muted/50">
+                          <td className="py-2 px-2 font-medium">{comp.name}</td>
+                          <td className="py-2 px-2">{comp.platform || "N/A"}</td>
                           <td className="py-2 px-2 text-sm text-muted-foreground">
-                            {new Date(backup.backupDate).toLocaleString()}
-                          </td>
-                          <td className="py-2 px-2">
-                            <Badge
-                              variant={
-                                backup.status === "Success"
-                                  ? "default"
-                                  : "secondary"
-                              }
-                            >
-                              {backup.status}
-                            </Badge>
+                            {comp.jobName || "N/A"}
                           </td>
                           <td className="py-2 px-2 text-right">
-                            {formatBytes(backup.sizeBytes)}
+                            {formatBytes(comp.usedSourceSizeBytes)}
+                          </td>
+                          <td className="py-2 px-2 text-xs text-muted-foreground">
+                            {comp.lastProtectedDate ? new Date(comp.lastProtectedDate).toLocaleDateString() : "N/A"}
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
-                  {billingData.backups.length > 50 && (
-                    <p className="text-xs text-muted-foreground mt-2">
-                      Mostrando 50 de {billingData.backups.length} backups
-                    </p>
-                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* File Shares Tab */}
+          <TabsContent value="fileshares">
+            <Card>
+              <CardHeader>
+                <CardTitle>Lista de File Shares Protegidos</CardTitle>
+                <CardDescription>
+                  Total de {billingData.fileShareCount || 0} Compartilhamentos
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="border-b">
+                      <tr>
+                        <th className="text-left py-2 px-2">Nome</th>
+                        <th className="text-left py-2 px-2">Plataforma</th>
+                        <th className="text-left py-2 px-2">Job</th>
+                        <th className="text-right py-2 px-2">Tamanho Usado</th>
+                        <th className="text-left py-2 px-2">Última Proteção</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(billingData.fileShares || []).map((fs, idx) => (
+                        <tr key={fs.fileShareUid || idx} className="border-b hover:bg-muted/50">
+                          <td className="py-2 px-2 font-medium">{fs.name}</td>
+                          <td className="py-2 px-2">{fs.platform || "N/A"}</td>
+                          <td className="py-2 px-2 text-sm text-muted-foreground">
+                            {fs.jobName || "N/A"}
+                          </td>
+                          <td className="py-2 px-2 text-right">
+                            {formatBytes(fs.usedSourceSizeBytes)}
+                          </td>
+                          <td className="py-2 px-2 text-xs text-muted-foreground">
+                            {fs.lastProtectedDate ? new Date(fs.lastProtectedDate).toLocaleDateString() : "N/A"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* Backups Consolidado Tab */}
+          <TabsContent value="backups">
+            <Card>
+              <CardHeader>
+                <CardTitle>Backups Consolidado</CardTitle>
+                <CardDescription>
+                  {jobGroups.length} jobs | {grandTotalVMs} VMs | {grandTotalBackups} backups retidos | Base: R$ {unitPrice.toFixed(2)} por GB
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="border-b">
+                      <tr>
+                        <th className="text-left py-2 px-2">Job / VM</th>
+                        <th className="text-right py-2 px-2">VMs</th>
+                        <th className="text-right py-2 px-2">Backups Retidos</th>
+                        <th className="text-right py-2 px-2">Tamanho Total</th>
+                        <th className="text-right py-2 px-2">Volume (GB)</th>
+                        <th className="text-right py-2 px-2">Valor a Cobrar (R$)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobGroups.map((group, gIdx) => {
+                        const jobGb = group.totalBytes / (1024 * 1024 * 1024);
+                        const jobCost = jobGb * unitPrice;
+                        return (
+                          <>
+                            {/* Job header row */}
+                            <tr key={`job-${gIdx}`} className="bg-muted/40 border-b font-semibold">
+                              <td className="py-2 px-2">
+                                <Zap className="inline h-4 w-4 mr-1 text-primary/70" />
+                                {group.jobName}
+                              </td>
+                              <td className="py-2 px-2 text-right">{group.vms.length}</td>
+                              <td className="py-2 px-2 text-right">{group.totalBackups}</td>
+                              <td className="py-2 px-2 text-right">{formatBytes(group.totalBytes)}</td>
+                              <td className="py-2 px-2 text-right">{jobGb.toFixed(2)}</td>
+                              <td className="py-2 px-2 text-right text-primary">R$ {jobCost.toFixed(2)}</td>
+                            </tr>
+                            {/* VM detail rows */}
+                            {group.vms.map((vm, vIdx) => {
+                              const vmGb = vm.usedSourceSizeBytes / (1024 * 1024 * 1024);
+                              const vmCost = vmGb * unitPrice;
+                              return (
+                                <tr key={`vm-${gIdx}-${vIdx}`} className="border-b hover:bg-muted/20 text-muted-foreground">
+                                  <td className="py-1.5 px-2 pl-8">{vm.name}</td>
+                                  <td className="py-1.5 px-2 text-right">—</td>
+                                  <td className="py-1.5 px-2 text-right">{vm.backupCount}</td>
+                                  <td className="py-1.5 px-2 text-right">{formatBytes(vm.usedSourceSizeBytes)}</td>
+                                  <td className="py-1.5 px-2 text-right">{vmGb.toFixed(2)}</td>
+                                  <td className="py-1.5 px-2 text-right">R$ {vmCost.toFixed(2)}</td>
+                                </tr>
+                              );
+                            })}
+                          </>
+                        );
+                      })}
+                    </tbody>
+                    <tfoot className="border-t-2 font-bold bg-muted/30">
+                      <tr>
+                        <td className="py-3 px-2">TOTAL GERAL</td>
+                        <td className="py-3 px-2 text-right">{grandTotalVMs}</td>
+                        <td className="py-3 px-2 text-right">{grandTotalBackups}</td>
+                        <td className="py-3 px-2 text-right">{formatBytes(grandTotalBytes)}</td>
+                        <td className="py-3 px-2 text-right">{(grandTotalBytes / (1024 * 1024 * 1024)).toFixed(2)}</td>
+                        <td className="py-3 px-2 text-right text-primary">R$ {((grandTotalBytes / (1024 * 1024 * 1024)) * unitPrice).toFixed(2)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
               </CardContent>
             </Card>

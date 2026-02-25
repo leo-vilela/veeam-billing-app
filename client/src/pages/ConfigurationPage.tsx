@@ -19,7 +19,7 @@ export default function ConfigurationPage({
   error,
 }: ConfigurationPageProps) {
   const [formData, setFormData] = useState<VeeamConfig>({
-    apiUrl: "https://veeam-server:1239",
+    apiUrl: "https://0.0.0.0:1239",
     username: "",
     password: "",
     startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
@@ -65,14 +65,14 @@ export default function ConfigurationPage({
                 id="apiUrl"
                 name="apiUrl"
                 type="url"
-                placeholder="https://veeam-server:1239"
+                placeholder="https://10.43.67.15:1239"
                 value={formData.apiUrl}
                 onChange={handleChange}
                 required
                 disabled={isLoading}
               />
               <p className="text-xs text-muted-foreground">
-                Exemplo: https://seu-servidor-veeam:1239
+                Exemplo: https://10.43.67.15:1239
               </p>
             </div>
 
