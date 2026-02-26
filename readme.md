@@ -16,7 +16,7 @@ O principal objetivo desta aplicação é fornecer a provedores de serviço e ad
   - Compartilhamentos de Arquivo (File Shares NAS/SMB)
 - **Consolidação por Job**: A aba *Backups Consolidado* unifica todas as VMs e backups pertencentes a um mesmo Job para facilitar a fatura de locatários e departamentos.
 - **Exportação CSV**: Exportação completa e organizada dos dados renderizados (incluindo abas de VMs, Servidores Físicos e File Shares separados) ideal para importar no Excel ou em outro sistema de faturamento.
-- **Auditoria de Licenciamento (Nova Funcionalidade)**: Recupera do endpoint de "Usage" informações sobre licenças disponíveis e consumidas da VUL (Veeam Universal License) para fácil controle de consumo no topo do painel.
+- **Auditoria de Licenciamento**: Recupera do endpoint de "Usage" informações sobre licenças disponíveis e consumidas da VUL (Veeam Universal License) para fácil controle de consumo no topo do painel.
 - **Bypass de CORS Embutido**: Inclui um proxy de desenvolvimento rápido configurado via Vite que contorna problemas comuns de CORS e de Certificados SSL Auto-Assinados em ambientes locais do Veeam ONE.
 
 ## 🛠️ Tecnologias Utilizadas

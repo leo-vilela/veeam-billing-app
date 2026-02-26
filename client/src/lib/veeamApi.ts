@@ -1,4 +1,12 @@
-import { VeeamConfig, BillingData, VeeamJob, VeeamVM, VeeamComputer, VeeamFileShare, VeeamBackup } from "@/types/veeam";
+import {
+  VeeamConfig,
+  BillingData,
+  VeeamJob,
+  VeeamVM,
+  VeeamComputer,
+  VeeamFileShare,
+  VeeamBackup,
+} from "@/types/veeam";
 
 const capabilityCache = new Map<string, boolean>();
 
@@ -170,12 +178,16 @@ async function getLegacyServiceInfo(
   apiUrl: string,
   token: string
 ): Promise<VeeamOneServiceInfo | null> {
-  const response = await veeamRequest(apiUrl, "/api/v1/about/installationInfo", {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-  });
+  const response = await veeamRequest(
+    apiUrl,
+    "/api/v1/about/installationInfo",
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    }
+  );
 
   if (!response.ok) {
     return null;
@@ -437,7 +449,9 @@ export async function getVeeamComputers(
   );
 
   if (!response.ok) {
-    console.warn("Endpoints de computadores podem não estar licenciados ou falharam.");
+    console.warn(
+      "Endpoints de computadores podem não estar licenciados ou falharam."
+    );
     return [];
   }
 
@@ -446,10 +460,17 @@ export async function getVeeamComputers(
 
   // Enriquecer com dados de backup (jobName, usedSourceSizeBytes)
   const enriched: VeeamComputer[] = await Promise.all(
-    computers.map(async (comp) => {
+    computers.map(async comp => {
       const uid = comp.computerUidInVbr || comp.computerId;
-      let jobName = "";
-      let usedSourceSizeBytes = 0;
+      let jobName = comp.jobName || "";
+      let usedSourceSizeBytes = Number(
+        comp.usedSourceSizeBytes ||
+        comp.sourceSizeBytes ||
+        comp.sizeBytes ||
+        comp.totalSize ||
+        0
+      );
+      let backupCount = Number(comp.backupCount || comp.restorePointCount || comp.restorePointsCount || 0);
 
       if (uid) {
         try {
@@ -466,12 +487,27 @@ export async function getVeeamComputers(
           if (backupsResp.ok) {
             const backupsData = await readJsonSafely<any>(backupsResp);
             const backups: any[] = backupsData.items || [];
+            const totalFromApi = Number(backupsData.totalCount || backupsData.total || backupsData.count || 0);
+            if (totalFromApi > 0) {
+              backupCount = totalFromApi;
+            } else if (backups.length > 0) {
+              backupCount = backups.length;
+            }
             if (backups.length > 0) {
-              jobName = backups[0].jobName || "";
-              usedSourceSizeBytes = backups.reduce(
-                (sum: number, b: any) => sum + (b.usedSourceSizeBytes || b.totalRestorePointSizeBytes || 0),
+              jobName = jobName || backups[0].jobName || "";
+              const latestBackup = backups[0];
+              const latestSize = Number(
+                latestBackup.usedSourceSizeBytes ||
+                latestBackup.sourceSizeBytes ||
+                latestBackup.totalRestorePointSizeBytes ||
+                latestBackup.sizeBytes ||
+                latestBackup.backupSize ||
+                latestBackup.dataSizeBytes ||
                 0
               );
+              if (latestSize > 0 && usedSourceSizeBytes === 0) {
+                usedSourceSizeBytes = latestSize;
+              }
             }
           }
         } catch (e) {
@@ -487,6 +523,7 @@ export async function getVeeamComputers(
         lastProtectedDate: comp.lastProtectedDate,
         jobName,
         jobUid: "",
+        backupCount,
       };
     })
   );
@@ -519,7 +556,9 @@ export async function getVeeamFileShares(
   );
 
   if (!response.ok) {
-    console.warn("Endpoints de file shares podem não estar licenciados ou falharam.");
+    console.warn(
+      "Endpoints de file shares podem não estar licenciados ou falharam."
+    );
     return [];
   }
 
@@ -528,10 +567,18 @@ export async function getVeeamFileShares(
 
   // Enriquecer com dados de backup (jobName, usedSourceSizeBytes)
   const enriched: VeeamFileShare[] = await Promise.all(
-    shares.map(async (fs) => {
+    shares.map(async fs => {
       const uid = fs.fileShareUidInVbr || fs.fileShareId;
-      let jobName = "";
-      let usedSourceSizeBytes = 0;
+      let jobName = fs.jobName || "";
+      let usedSourceSizeBytes = Number(
+        fs.usedSourceSizeBytes ||
+        fs.sourceSizeBytes ||
+        fs.sizeBytes ||
+        fs.totalSize ||
+        fs.capacityBytes ||
+        0
+      );
+      let backupCount = Number(fs.backupCount || fs.restorePointCount || fs.restorePointsCount || 0);
 
       if (uid) {
         try {
@@ -548,12 +595,27 @@ export async function getVeeamFileShares(
           if (backupsResp.ok) {
             const backupsData = await readJsonSafely<any>(backupsResp);
             const backups: any[] = backupsData.items || [];
+            const totalFromApi = Number(backupsData.totalCount || backupsData.total || backupsData.count || 0);
+            if (totalFromApi > 0) {
+              backupCount = totalFromApi;
+            } else if (backups.length > 0) {
+              backupCount = backups.length;
+            }
             if (backups.length > 0) {
-              jobName = backups[0].jobName || "";
-              usedSourceSizeBytes = backups.reduce(
-                (sum: number, b: any) => sum + (b.usedSourceSizeBytes || b.totalRestorePointSizeBytes || 0),
+              jobName = jobName || backups[0].jobName || "";
+              const latestBackup = backups[0];
+              const latestSize = Number(
+                latestBackup.usedSourceSizeBytes ||
+                latestBackup.sourceSizeBytes ||
+                latestBackup.totalRestorePointSizeBytes ||
+                latestBackup.sizeBytes ||
+                latestBackup.backupSize ||
+                latestBackup.dataSizeBytes ||
                 0
               );
+              if (latestSize > 0 && usedSourceSizeBytes === 0) {
+                usedSourceSizeBytes = latestSize;
+              }
             }
           }
         } catch (e) {
@@ -569,6 +631,7 @@ export async function getVeeamFileShares(
         lastProtectedDate: fs.lastProtectedDate,
         jobName,
         jobUid: "",
+        backupCount,
       };
     })
   );
@@ -665,12 +728,16 @@ export async function getVeeamSessions(
 
   // Fallback para API do Veeam ONE v2.2
   try {
-    const response = await veeamRequest(apiUrl, `/api/v2.2/taskSessions?${params}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const response = await veeamRequest(
+      apiUrl,
+      `/api/v2.2/taskSessions?${params}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
     if (response.ok) {
       const data = await readJsonSafely<any>(response);
@@ -691,12 +758,16 @@ export async function getVeeamLicensingUsage(
   token: string
 ): Promise<any> {
   try {
-    const response = await veeamRequest(apiUrl, `/api/v2.2/license/currentUsage`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
+    const response = await veeamRequest(
+      apiUrl,
+      `/api/v2.2/license/currentUsage`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
     if (response.ok) {
       return readJsonSafely<any>(response);
@@ -763,10 +834,85 @@ export async function fetchBillingData(
     }
   }
 
+  // Buscar backups de todos os Agents (computadores)
+  for (const comp of computers) {
+    const uid = (comp as any).computerUid || (comp as any).computerUidInVbr;
+    if (!uid) continue;
+    try {
+      const resp = await veeamRequest(
+        apiUrl,
+        `/api/v2.2/protectedData/computers/${uid}/backups?skip=0&limit=1000`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      if (resp.ok) {
+        const data = await readJsonSafely<any>(resp);
+        const backups: any[] = data.items || [];
+        allBackups.push(
+          ...backups.map((backup: any) => ({
+            backupUid: backup.uid,
+            vmName: comp.name,
+            backupDate: backup.creationTime || backup.backupDate,
+            sizeBytes: backup.sizeBytes || 0,
+            status: backup.status || "Unknown",
+          }))
+        );
+      }
+    } catch (error) {
+      console.warn(`Erro ao buscar backups do Agent ${comp.name}:`, error);
+    }
+  }
+
+  // Buscar backups de todos os File Shares
+  for (const fs of fileShares) {
+    const uid = (fs as any).fileShareUid || (fs as any).fileShareUidInVbr;
+    if (!uid) continue;
+    try {
+      const resp = await veeamRequest(
+        apiUrl,
+        `/api/v2.2/protectedData/unstructuredData/fileShares/${uid}/backups?skip=0&limit=1000`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      if (resp.ok) {
+        const data = await readJsonSafely<any>(resp);
+        const backups: any[] = data.items || [];
+        allBackups.push(
+          ...backups.map((backup: any) => ({
+            backupUid: backup.uid,
+            vmName: fs.name,
+            backupDate: backup.creationTime || backup.backupDate,
+            sizeBytes: backup.sizeBytes || 0,
+            status: backup.status || "Unknown",
+          }))
+        );
+      }
+    } catch (error) {
+      console.warn(`Erro ao buscar backups do File Share ${fs.name}:`, error);
+    }
+  }
+
   // Calcular totais
-  const vmsVolume = vms.reduce((sum, vm) => sum + (vm.usedSourceSizeBytes || 0), 0);
-  const computersVolume = computers.reduce((sum, comp) => sum + (comp.usedSourceSizeBytes || 0), 0);
-  const fileSharesVolume = fileShares.reduce((sum, fs) => sum + (fs.usedSourceSizeBytes || 0), 0);
+  const vmsVolume = vms.reduce(
+    (sum, vm) => sum + (vm.usedSourceSizeBytes || 0),
+    0
+  );
+  const computersVolume = computers.reduce(
+    (sum, comp) => sum + (comp.usedSourceSizeBytes || 0),
+    0
+  );
+  const fileSharesVolume = fileShares.reduce(
+    (sum, fs) => sum + (fs.usedSourceSizeBytes || 0),
+    0
+  );
 
   const totalVolumeBytes = vmsVolume + computersVolume + fileSharesVolume;
 

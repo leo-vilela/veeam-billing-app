@@ -39,6 +39,7 @@ export interface VeeamComputer {
   lastProtectedDate?: string;
   jobName?: string;
   jobUid?: string;
+  backupCount?: number;
 }
 
 export interface VeeamFileShare {
@@ -49,6 +50,7 @@ export interface VeeamFileShare {
   lastProtectedDate?: string;
   jobName?: string;
   jobUid?: string;
+  backupCount?: number;
 }
 
 export interface VeeamBackup {

@@ -65,14 +65,14 @@ export default function ConfigurationPage({
                 id="apiUrl"
                 name="apiUrl"
                 type="url"
-                placeholder="https://10.43.67.15:1239"
+                placeholder="https://0.0.0.0:1239"
                 value={formData.apiUrl}
                 onChange={handleChange}
                 required
                 disabled={isLoading}
               />
               <p className="text-xs text-muted-foreground">
-                Exemplo: https://10.43.67.15:1239
+                Exemplo: https://192.168.1.1:1239
               </p>
             </div>
 
