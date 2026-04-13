@@ -27,8 +27,11 @@ import {
   XCircle,
   Clock,
   TrendingUp,
+  Zap,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
-import { FailuresData, VeeamConfig, WorkloadFailureSummary } from "@/types/veeam";
+import { FailuresData, VeeamConfig, JobFailureSummary } from "@/types/veeam";
 
 interface FailuresDashboardProps {
   failuresData: FailuresData;
@@ -38,9 +41,9 @@ interface FailuresDashboardProps {
 }
 
 const WORKLOAD_ICONS: Record<string, React.ReactNode> = {
-  vm: <Server className="h-4 w-4" />,
-  agent: <Monitor className="h-4 w-4" />,
-  fileshare: <Folder className="h-4 w-4" />,
+  vm: <Server className="h-3.5 w-3.5" />,
+  agent: <Monitor className="h-3.5 w-3.5" />,
+  fileshare: <Folder className="h-3.5 w-3.5" />,
 };
 
 const WORKLOAD_LABELS: Record<string, string> = {
@@ -69,43 +72,65 @@ export default function FailuresDashboard({
   onReset,
   isLoading = false,
 }: FailuresDashboardProps) {
+  const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
   const [activeGapFilter, setActiveGapFilter] = useState<string>("all");
 
   const totalRate = failuresData.totalSessions > 0
     ? ((failuresData.successSessions / failuresData.totalSessions) * 100).toFixed(1)
     : "100.0";
 
-  // Dados para gráfico de pizza de status
-  const statusPieData = [
-    { name: "Sucesso", value: failuresData.successSessions },
-    { name: "Aviso", value: failuresData.warningSessions },
-    { name: "Falha", value: failuresData.failedSessions },
+  const toggleJob = (jobName: string) => {
+    setExpandedJobs(prev => {
+      const next = new Set(prev);
+      if (next.has(jobName)) {
+        next.delete(jobName);
+      } else {
+        next.add(jobName);
+      }
+      return next;
+    });
+  };
+
+  const expandAll = () => {
+    setExpandedJobs(new Set(failuresData.jobSummary.map(j => j.jobName)));
+  };
+
+  const collapseAll = () => {
+    setExpandedJobs(new Set());
+  };
+
+  // Dados para gráfico de pizza — status dos JOBS
+  const jobStatusPieData = [
+    { name: "Sucesso", value: failuresData.jobSummary.filter(j => j.jobStatus.toLowerCase() === "success").length },
+    { name: "Aviso", value: failuresData.jobSummary.filter(j => j.jobStatus.toLowerCase() === "warning").length },
+    { name: "Falha", value: failuresData.jobSummary.filter(j => ["failed", "error"].includes(j.jobStatus.toLowerCase())).length },
+    { name: "Outros", value: failuresData.jobSummary.filter(j => !["success", "warning", "failed", "error"].includes(j.jobStatus.toLowerCase())).length },
   ].filter(d => d.value > 0);
 
-  const PIE_COLORS = ["#10b981", "#f59e0b", "#ef4444"];
+  const PIE_COLORS = ["#10b981", "#f59e0b", "#ef4444", "#94a3b8"];
 
-  // Top 10 workloads com mais falhas
-  const topFailures = failuresData.workloadSummary
-    .filter(w => w.failedCount > 0)
+  // Top 10 jobs com mais falhas
+  const topFailures = failuresData.jobSummary
+    .filter(j => j.failedCount > 0)
     .slice(0, 10)
-    .map(w => ({
-      name: w.workloadName.length > 18 ? w.workloadName.substring(0, 18) + "…" : w.workloadName,
-      fullName: w.workloadName,
-      falhas: w.failedCount,
-      avisos: w.warningCount,
-      tipo: WORKLOAD_LABELS[w.workloadType] || w.workloadType,
+    .map(j => ({
+      name: j.jobName.length > 20 ? j.jobName.substring(0, 20) + "…" : j.jobName,
+      fullName: j.jobName,
+      falhas: j.failedCount,
+      avisos: j.warningCount,
+      workloads: j.totalWorkloads,
     }));
 
-  // Top 10 workloads com maiores lacunas
-  const topGaps = failuresData.workloadSummary
-    .filter(w => w.maxGapDays > 0)
+  // Top 10 jobs com maiores lacunas
+  const topGaps = failuresData.jobSummary
+    .filter(j => j.maxGapDays > 0)
     .sort((a, b) => b.maxGapDays - a.maxGapDays)
     .slice(0, 10)
-    .map(w => ({
-      name: w.workloadName.length > 18 ? w.workloadName.substring(0, 18) + "…" : w.workloadName,
-      fullName: w.workloadName,
-      diasSemBackup: w.maxGapDays,
-      tipo: WORKLOAD_LABELS[w.workloadType] || w.workloadType,
+    .map(j => ({
+      name: j.jobName.length > 20 ? j.jobName.substring(0, 20) + "…" : j.jobName,
+      fullName: j.jobName,
+      diasSemBackup: j.maxGapDays,
+      workloads: j.totalWorkloads,
     }));
 
   // Filtragem de gaps
@@ -122,24 +147,29 @@ export default function FailuresDashboard({
   const handleExportCSV = () => {
     let csv = "Relatório de Falhas e Lacunas de Backup Veeam\n";
     csv += `Período: ${config.startDate} a ${config.endDate}\n\n`;
+    csv += `Total de Jobs,${failuresData.totalJobs}\n`;
     csv += `Total de Workloads,${failuresData.totalWorkloads}\n`;
     csv += `Total de Sessões,${failuresData.totalSessions}\n`;
     csv += `Sessões com Falha,${failuresData.failedSessions}\n`;
     csv += `Sessões com Aviso,${failuresData.warningSessions}\n`;
-    csv += `Sessões com Sucesso,${failuresData.successSessions}\n`;
     csv += `Taxa de Sucesso,${totalRate}%\n`;
-    csv += `Workloads com Lacunas,${failuresData.workloadsWithGaps}\n\n`;
+    csv += `Jobs com Falha,${failuresData.jobsWithFailures}\n`;
+    csv += `Jobs com Lacunas,${failuresData.jobsWithGaps}\n\n`;
 
-    csv += "Falhas por Workload\n";
-    csv += "Workload,Tipo,Job,Total Sessões,Falhas,Avisos,Sucessos,Taxa de Falha (%),Maior Lacuna (dias),Último Backup,Erros\n";
-    for (const w of failuresData.workloadSummary) {
-      csv += `"${w.workloadName}",${w.workloadType},"${w.jobName}",${w.totalSessions},${w.failedCount},${w.warningCount},${w.successCount},${w.failureRate.toFixed(1)},${w.maxGapDays},${w.lastBackupDate || "N/A"},"${w.errors.join('; ')}"\n`;
+    csv += "Falhas por Job\n";
+    csv += "Job,Status,Workloads,Total Sessões,Falhas,Avisos,Sucessos,Taxa de Falha (%),Maior Lacuna (dias),Erros\n";
+    for (const j of failuresData.jobSummary) {
+      csv += `"${j.jobName}",${j.jobStatus},${j.totalWorkloads},${j.totalSessions},${j.failedCount},${j.warningCount},${j.successCount},${j.failureRate.toFixed(1)},${j.maxGapDays},"${j.errors.join('; ')}"\n`;
+
+      for (const w of j.workloads) {
+        csv += `"  → ${w.workloadName}",${w.workloadType},,${w.totalSessions},${w.failedCount},${w.warningCount},${w.successCount},${w.failureRate.toFixed(1)},${w.maxGapDays},"${w.errors.join('; ')}"\n`;
+      }
     }
 
     csv += "\nLacunas de Backup\n";
-    csv += "Workload,Tipo,Job,Início da Lacuna,Fim da Lacuna,Dias sem Backup\n";
+    csv += "Job,Workload,Tipo,Início da Lacuna,Fim da Lacuna,Dias sem Backup\n";
     for (const g of failuresData.gaps) {
-      csv += `"${g.workloadName}",${g.workloadType},"${g.jobName}",${g.gapStart},${g.gapEnd},${g.gapDays}\n`;
+      csv += `"${g.jobName}","${g.workloadName}",${g.workloadType},${g.gapStart},${g.gapEnd},${g.gapDays}\n`;
     }
 
     const element = document.createElement("a");
@@ -199,13 +229,13 @@ export default function FailuresDashboard({
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Workloads Analisados
+                Jobs Analisados
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
-                <div className="text-3xl font-bold">{failuresData.totalWorkloads}</div>
-                <Server className="h-8 w-8 text-primary/60" />
+                <div className="text-3xl font-bold">{failuresData.totalJobs}</div>
+                <Zap className="h-8 w-8 text-primary/60" />
               </div>
             </CardContent>
           </Card>
@@ -227,12 +257,12 @@ export default function FailuresDashboard({
           <Card className="border-red-200 bg-red-50/30">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-red-600">
-                Sessões com Falha
+                Jobs com Falha
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
-                <div className="text-3xl font-bold text-red-600">{failuresData.failedSessions}</div>
+                <div className="text-3xl font-bold text-red-600">{failuresData.jobsWithFailures}</div>
                 <XCircle className="h-8 w-8 text-red-400" />
               </div>
             </CardContent>
@@ -269,12 +299,12 @@ export default function FailuresDashboard({
           <Card className="border-violet-200 bg-violet-50/30">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-violet-600">
-                Com Lacunas
+                Jobs com Lacunas
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
-                <div className="text-3xl font-bold text-violet-600">{failuresData.workloadsWithGaps}</div>
+                <div className="text-3xl font-bold text-violet-600">{failuresData.jobsWithGaps}</div>
                 <ShieldAlert className="h-8 w-8 text-violet-400" />
               </div>
             </CardContent>
@@ -285,7 +315,7 @@ export default function FailuresDashboard({
         <Tabs defaultValue="overview" className="space-y-4">
           <TabsList>
             <TabsTrigger value="overview">Visão Geral</TabsTrigger>
-            <TabsTrigger value="workloads">Falhas por Workload</TabsTrigger>
+            <TabsTrigger value="jobs">Falhas por Job</TabsTrigger>
             <TabsTrigger value="gaps">Lacunas de Backup</TabsTrigger>
             <TabsTrigger value="sessions">Todas as Sessões</TabsTrigger>
           </TabsList>
@@ -293,20 +323,20 @@ export default function FailuresDashboard({
           {/* ── Overview Tab ── */}
           <TabsContent value="overview" className="space-y-4">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {/* Status Pie */}
+              {/* Status Pie — Jobs */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Distribuição de Status</CardTitle>
+                  <CardTitle>Status dos Jobs</CardTitle>
                   <CardDescription>
-                    Status de todas as sessões de backup no período
+                    Distribuição de status do último run de cada job
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  {statusPieData.length > 0 ? (
+                  {jobStatusPieData.length > 0 ? (
                     <ResponsiveContainer width="100%" height={300}>
                       <PieChart>
                         <Pie
-                          data={statusPieData}
+                          data={jobStatusPieData}
                           cx="50%"
                           cy="50%"
                           labelLine={false}
@@ -315,7 +345,7 @@ export default function FailuresDashboard({
                           fill="#8884d8"
                           dataKey="value"
                         >
-                          {statusPieData.map((_entry, index) => (
+                          {jobStatusPieData.map((_entry, index) => (
                             <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
                           ))}
                         </Pie>
@@ -323,17 +353,17 @@ export default function FailuresDashboard({
                       </PieChart>
                     </ResponsiveContainer>
                   ) : (
-                    <p className="text-center text-muted-foreground py-8">Nenhuma sessão encontrada.</p>
+                    <p className="text-center text-muted-foreground py-8">Nenhum job encontrado.</p>
                   )}
                 </CardContent>
               </Card>
 
-              {/* Top Failures Bar */}
+              {/* Top Failures Bar — Jobs */}
               <Card>
                 <CardHeader>
-                  <CardTitle>Top 10 Workloads com Mais Falhas</CardTitle>
+                  <CardTitle>Top 10 Jobs com Mais Falhas</CardTitle>
                   <CardDescription>
-                    Workloads com maior número de sessões falhadas
+                    Jobs com maior número de sessões falhadas
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
@@ -342,7 +372,7 @@ export default function FailuresDashboard({
                       <BarChart data={topFailures} layout="vertical">
                         <CartesianGrid strokeDasharray="3 3" />
                         <XAxis type="number" />
-                        <YAxis type="category" dataKey="name" width={140} tick={{ fontSize: 12 }} />
+                        <YAxis type="category" dataKey="name" width={160} tick={{ fontSize: 12 }} />
                         <Tooltip
                           content={({ active, payload }) => {
                             if (active && payload && payload.length) {
@@ -350,7 +380,7 @@ export default function FailuresDashboard({
                               return (
                                 <div className="bg-background border rounded-lg p-2 shadow-lg text-sm">
                                   <p className="font-semibold">{data.fullName}</p>
-                                  <p className="text-muted-foreground">{data.tipo}</p>
+                                  <p className="text-muted-foreground">{data.workloads} workloads</p>
                                   <p className="text-red-600">Falhas: {data.falhas}</p>
                                   <p className="text-amber-600">Avisos: {data.avisos}</p>
                                 </div>
@@ -369,12 +399,12 @@ export default function FailuresDashboard({
               </Card>
             </div>
 
-            {/* Top Gaps Bar */}
+            {/* Top Gaps Bar — Jobs */}
             <Card>
               <CardHeader>
-                <CardTitle>Top 10 Workloads com Maiores Lacunas</CardTitle>
+                <CardTitle>Top 10 Jobs com Maiores Lacunas</CardTitle>
                 <CardDescription>
-                  Workloads com mais dias consecutivos sem backup
+                  Jobs com mais dias consecutivos sem backup em algum workload
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -391,7 +421,7 @@ export default function FailuresDashboard({
                             return (
                               <div className="bg-background border rounded-lg p-2 shadow-lg text-sm">
                                 <p className="font-semibold">{data.fullName}</p>
-                                <p className="text-muted-foreground">{data.tipo}</p>
+                                <p className="text-muted-foreground">{data.workloads} workloads</p>
                                 <p className="text-violet-600">Maior lacuna: {data.diasSemBackup} dias</p>
                               </div>
                             );
@@ -403,100 +433,163 @@ export default function FailuresDashboard({
                     </BarChart>
                   </ResponsiveContainer>
                 ) : (
-                  <p className="text-center text-muted-foreground py-8">Nenhuma lacuna detectada. Todos os workloads possuem backup diário. 🎉</p>
+                  <p className="text-center text-muted-foreground py-8">Nenhuma lacuna detectada. 🎉</p>
                 )}
               </CardContent>
             </Card>
           </TabsContent>
 
-          {/* ── Falhas por Workload Tab ── */}
-          <TabsContent value="workloads">
+          {/* ── Falhas por Job Tab ── */}
+          <TabsContent value="jobs">
             <Card>
               <CardHeader>
-                <CardTitle>Falhas por Workload</CardTitle>
-                <CardDescription>
-                  Detalhamento de falhas, avisos e lacunas agrupado por workload —
-                  {" "}{failuresData.workloadSummary.length} workloads analisados
-                </CardDescription>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Falhas por Job (Cliente)</CardTitle>
+                    <CardDescription>
+                      {failuresData.jobSummary.length} jobs analisados — clique em um job para expandir seus workloads
+                    </CardDescription>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={expandAll}>
+                      Expandir Todos
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={collapseAll}>
+                      Recolher Todos
+                    </Button>
+                  </div>
+                </div>
               </CardHeader>
               <CardContent>
                 <div className="overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead className="border-b">
                       <tr>
-                        <th className="text-left py-2 px-2">Workload</th>
-                        <th className="text-left py-2 px-2">Tipo</th>
-                        <th className="text-left py-2 px-2">Job</th>
+                        <th className="text-left py-2 px-2">Job / Workload</th>
+                        <th className="text-left py-2 px-2">Status</th>
+                        <th className="text-right py-2 px-2">Workloads</th>
                         <th className="text-right py-2 px-2">Sessões</th>
                         <th className="text-right py-2 px-2">Falhas</th>
                         <th className="text-right py-2 px-2">Avisos</th>
                         <th className="text-right py-2 px-2">Taxa Falha</th>
                         <th className="text-right py-2 px-2">Maior Lacuna</th>
-                        <th className="text-left py-2 px-2">Último Backup</th>
                         <th className="text-left py-2 px-2">Erros</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {failuresData.workloadSummary.length === 0 ? (
+                      {failuresData.jobSummary.length === 0 ? (
                         <tr>
-                          <td colSpan={10} className="py-8 text-center text-muted-foreground">
-                            Nenhum workload encontrado.
+                          <td colSpan={9} className="py-8 text-center text-muted-foreground">
+                            Nenhum job encontrado.
                           </td>
                         </tr>
                       ) : (
-                        failuresData.workloadSummary.map((w, idx) => (
-                          <tr key={`wl-${idx}`} className={`border-b hover:bg-muted/50 ${w.failedCount > 0 ? "bg-red-50/30" : ""}`}>
-                            <td className="py-2 px-2 font-medium flex items-center gap-1.5">
-                              {WORKLOAD_ICONS[w.workloadType]}
-                              {w.workloadName}
-                            </td>
-                            <td className="py-2 px-2">
-                              <Badge variant="outline" className="text-xs">
-                                {WORKLOAD_LABELS[w.workloadType] || w.workloadType}
-                              </Badge>
-                            </td>
-                            <td className="py-2 px-2 text-muted-foreground text-xs">{w.jobName}</td>
-                            <td className="py-2 px-2 text-right">{w.totalSessions}</td>
-                            <td className="py-2 px-2 text-right">
-                              {w.failedCount > 0 ? (
-                                <span className="text-red-600 font-semibold">{w.failedCount}</span>
-                              ) : (
-                                <span className="text-muted-foreground">0</span>
-                              )}
-                            </td>
-                            <td className="py-2 px-2 text-right">
-                              {w.warningCount > 0 ? (
-                                <span className="text-amber-600 font-semibold">{w.warningCount}</span>
-                              ) : (
-                                <span className="text-muted-foreground">0</span>
-                              )}
-                            </td>
-                            <td className="py-2 px-2 text-right">
-                              <span className={`font-semibold ${w.failureRate > 50 ? "text-red-600" : w.failureRate > 0 ? "text-amber-600" : "text-emerald-600"}`}>
-                                {w.failureRate.toFixed(1)}%
-                              </span>
-                            </td>
-                            <td className="py-2 px-2 text-right">
-                              {w.maxGapDays > 0 ? (
-                                <span className="text-violet-600 font-semibold">{w.maxGapDays}d</span>
-                              ) : (
-                                <span className="text-muted-foreground">—</span>
-                              )}
-                            </td>
-                            <td className="py-2 px-2 text-xs text-muted-foreground">
-                              {w.lastBackupDate
-                                ? new Date(w.lastBackupDate).toLocaleDateString()
-                                : "N/A"}
-                            </td>
-                            <td className="py-2 px-2 text-xs max-w-[200px] truncate" title={w.errors.join("; ")}>
-                              {w.errors.length > 0 ? (
-                                <span className="text-red-600">{w.errors[0]}</span>
-                              ) : (
-                                <span className="text-muted-foreground">—</span>
-                              )}
-                            </td>
-                          </tr>
-                        ))
+                        failuresData.jobSummary.map((job, jIdx) => {
+                          const isExpanded = expandedJobs.has(job.jobName);
+                          return (
+                            <>
+                              {/* Job Row (pai) */}
+                              <tr
+                                key={`job-${jIdx}`}
+                                className={`
+                                  border-b font-semibold cursor-pointer transition-colors
+                                  ${job.failedCount > 0 ? "bg-red-50/40 hover:bg-red-50/60" : "bg-muted/40 hover:bg-muted/60"}
+                                `}
+                                onClick={() => toggleJob(job.jobName)}
+                              >
+                                <td className="py-2 px-2">
+                                  <span className="inline-flex items-center gap-1.5">
+                                    {isExpanded
+                                      ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                                      : <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                                    }
+                                    <Zap className="h-4 w-4 text-primary/70" />
+                                    {job.jobName}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-2">{getStatusBadge(job.jobStatus)}</td>
+                                <td className="py-2 px-2 text-right">{job.totalWorkloads}</td>
+                                <td className="py-2 px-2 text-right">{job.totalSessions}</td>
+                                <td className="py-2 px-2 text-right">
+                                  {job.failedCount > 0 ? (
+                                    <span className="text-red-600 font-bold">{job.failedCount}</span>
+                                  ) : (
+                                    <span className="text-muted-foreground">0</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-right">
+                                  {job.warningCount > 0 ? (
+                                    <span className="text-amber-600 font-bold">{job.warningCount}</span>
+                                  ) : (
+                                    <span className="text-muted-foreground">0</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-right">
+                                  <span className={`font-bold ${job.failureRate > 50 ? "text-red-600" : job.failureRate > 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                                    {job.failureRate.toFixed(1)}%
+                                  </span>
+                                </td>
+                                <td className="py-2 px-2 text-right">
+                                  {job.maxGapDays > 0 ? (
+                                    <span className="text-violet-600 font-bold">{job.maxGapDays}d</span>
+                                  ) : (
+                                    <span className="text-muted-foreground">—</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-xs max-w-[180px] truncate" title={job.errors.join("; ")}>
+                                  {job.errors.length > 0 ? (
+                                    <span className="text-red-600">{job.errors.length} erro(s)</span>
+                                  ) : (
+                                    <span className="text-muted-foreground">—</span>
+                                  )}
+                                </td>
+                              </tr>
+
+                              {/* Workload Rows (filhos) */}
+                              {isExpanded && job.workloads.map((wl, wIdx) => (
+                                <tr key={`job-${jIdx}-wl-${wIdx}`} className={`border-b hover:bg-muted/20 text-muted-foreground ${wl.failedCount > 0 ? "bg-red-50/20" : ""}`}>
+                                  <td className="py-1.5 px-2 pl-10">
+                                    <span className="inline-flex items-center gap-1.5">
+                                      {WORKLOAD_ICONS[wl.workloadType]}
+                                      {wl.workloadName}
+                                      <Badge variant="outline" className="text-[10px] ml-1">
+                                        {WORKLOAD_LABELS[wl.workloadType]}
+                                      </Badge>
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 px-2">—</td>
+                                  <td className="py-1.5 px-2 text-right">—</td>
+                                  <td className="py-1.5 px-2 text-right">{wl.totalSessions}</td>
+                                  <td className="py-1.5 px-2 text-right">
+                                    {wl.failedCount > 0 ? (
+                                      <span className="text-red-600">{wl.failedCount}</span>
+                                    ) : "0"}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right">
+                                    {wl.warningCount > 0 ? (
+                                      <span className="text-amber-600">{wl.warningCount}</span>
+                                    ) : "0"}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right">
+                                    <span className={wl.failureRate > 50 ? "text-red-600" : wl.failureRate > 0 ? "text-amber-600" : ""}>
+                                      {wl.failureRate.toFixed(1)}%
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right">
+                                    {wl.maxGapDays > 0 ? (
+                                      <span className="text-violet-600">{wl.maxGapDays}d</span>
+                                    ) : "—"}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-xs max-w-[180px] truncate" title={wl.errors.join("; ")}>
+                                    {wl.errors.length > 0 ? (
+                                      <span className="text-red-600">{wl.errors[0]}</span>
+                                    ) : "—"}
+                                  </td>
+                                </tr>
+                              ))}
+                            </>
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -507,24 +600,21 @@ export default function FailuresDashboard({
 
           {/* ── Lacunas de Backup Tab ── */}
           <TabsContent value="gaps" className="space-y-4">
-            {/* Destaque da maior lacuna */}
             {biggestGap && (
               <Card className="border-violet-200 bg-violet-50/50">
                 <CardContent className="py-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="rounded-full p-2 bg-violet-100">
-                        <ShieldAlert className="h-6 w-6 text-violet-600" />
-                      </div>
-                      <div>
-                        <p className="font-bold text-violet-900">
-                          Maior lacuna detectada: {biggestGap.gapDays} dias
-                        </p>
-                        <p className="text-sm text-violet-700">
-                          {biggestGap.workloadName} ({WORKLOAD_LABELS[biggestGap.workloadType]})
-                          — de {biggestGap.gapStart} a {biggestGap.gapEnd}
-                        </p>
-                      </div>
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-full p-2 bg-violet-100">
+                      <ShieldAlert className="h-6 w-6 text-violet-600" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-violet-900">
+                        Maior lacuna detectada: {biggestGap.gapDays} dias
+                      </p>
+                      <p className="text-sm text-violet-700">
+                        Job: {biggestGap.jobName} → {biggestGap.workloadName} ({WORKLOAD_LABELS[biggestGap.workloadType]})
+                        — de {biggestGap.gapStart} a {biggestGap.gapEnd}
+                      </p>
                     </div>
                   </div>
                 </CardContent>
@@ -535,7 +625,7 @@ export default function FailuresDashboard({
               <CardHeader>
                 <CardTitle>Lacunas de Backup (Períodos sem Proteção)</CardTitle>
                 <CardDescription>
-                  {failuresData.gaps.length} lacunas detectadas em {failuresData.workloadsWithGaps} workloads
+                  {failuresData.gaps.length} lacunas detectadas em {failuresData.jobsWithGaps} jobs
                 </CardDescription>
                 <div className="flex gap-2 pt-2">
                   {["all", "vm", "agent", "fileshare"].map(filter => (
@@ -555,11 +645,11 @@ export default function FailuresDashboard({
                   <table className="w-full text-sm">
                     <thead className="border-b">
                       <tr>
+                        <th className="text-left py-2 px-2">Job</th>
                         <th className="text-left py-2 px-2">Workload</th>
                         <th className="text-left py-2 px-2">Tipo</th>
-                        <th className="text-left py-2 px-2">Job</th>
-                        <th className="text-left py-2 px-2">Início da Lacuna</th>
-                        <th className="text-left py-2 px-2">Fim da Lacuna</th>
+                        <th className="text-left py-2 px-2">Início</th>
+                        <th className="text-left py-2 px-2">Fim</th>
                         <th className="text-right py-2 px-2">Dias sem Backup</th>
                       </tr>
                     </thead>
@@ -575,16 +665,23 @@ export default function FailuresDashboard({
                           .sort((a, b) => b.gapDays - a.gapDays)
                           .map((gap, idx) => (
                             <tr key={`gap-${idx}`} className={`border-b hover:bg-muted/50 ${gap.gapDays >= 7 ? "bg-red-50/30" : gap.gapDays >= 3 ? "bg-amber-50/30" : ""}`}>
-                              <td className="py-2 px-2 font-medium flex items-center gap-1.5">
-                                {WORKLOAD_ICONS[gap.workloadType]}
-                                {gap.workloadName}
+                              <td className="py-2 px-2 font-medium">
+                                <span className="inline-flex items-center gap-1">
+                                  <Zap className="h-3.5 w-3.5 text-primary/70" />
+                                  {gap.jobName}
+                                </span>
+                              </td>
+                              <td className="py-2 px-2">
+                                <span className="inline-flex items-center gap-1">
+                                  {WORKLOAD_ICONS[gap.workloadType]}
+                                  {gap.workloadName}
+                                </span>
                               </td>
                               <td className="py-2 px-2">
                                 <Badge variant="outline" className="text-xs">
                                   {WORKLOAD_LABELS[gap.workloadType] || gap.workloadType}
                                 </Badge>
                               </td>
-                              <td className="py-2 px-2 text-muted-foreground text-xs">{gap.jobName}</td>
                               <td className="py-2 px-2">{gap.gapStart}</td>
                               <td className="py-2 px-2">{gap.gapEnd}</td>
                               <td className="py-2 px-2 text-right">
@@ -616,9 +713,9 @@ export default function FailuresDashboard({
                   <table className="w-full text-sm">
                     <thead className="border-b">
                       <tr>
+                        <th className="text-left py-2 px-2">Job</th>
                         <th className="text-left py-2 px-2">Workload</th>
                         <th className="text-left py-2 px-2">Tipo</th>
-                        <th className="text-left py-2 px-2">Job</th>
                         <th className="text-left py-2 px-2">Status</th>
                         <th className="text-left py-2 px-2">Data</th>
                         <th className="text-left py-2 px-2">Erro</th>
@@ -637,16 +734,23 @@ export default function FailuresDashboard({
                           .slice(0, 200)
                           .map((session, idx) => (
                             <tr key={`session-${idx}`} className={`border-b hover:bg-muted/50 ${session.status.toLowerCase() === "failed" ? "bg-red-50/30" : ""}`}>
-                              <td className="py-2 px-2 font-medium flex items-center gap-1.5">
-                                {WORKLOAD_ICONS[session.workloadType]}
-                                {session.workloadName}
+                              <td className="py-2 px-2 font-medium">
+                                <span className="inline-flex items-center gap-1">
+                                  <Zap className="h-3.5 w-3.5 text-primary/70" />
+                                  {session.jobName}
+                                </span>
+                              </td>
+                              <td className="py-2 px-2">
+                                <span className="inline-flex items-center gap-1">
+                                  {WORKLOAD_ICONS[session.workloadType]}
+                                  {session.workloadName}
+                                </span>
                               </td>
                               <td className="py-2 px-2">
                                 <Badge variant="outline" className="text-xs">
                                   {WORKLOAD_LABELS[session.workloadType] || session.workloadType}
                                 </Badge>
                               </td>
-                              <td className="py-2 px-2 text-muted-foreground text-xs">{session.jobName}</td>
                               <td className="py-2 px-2">{getStatusBadge(session.status)}</td>
                               <td className="py-2 px-2 text-xs text-muted-foreground">
                                 {session.startTime

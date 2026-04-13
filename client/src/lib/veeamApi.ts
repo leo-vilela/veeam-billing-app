@@ -9,7 +9,8 @@ import {
   FailuresData,
   BackupSession,
   BackupGap,
-  WorkloadFailureSummary,
+  JobFailureSummary,
+  WorkloadFailureDetail,
   WorkloadType,
 } from "@/types/veeam";
 
@@ -1076,23 +1077,51 @@ export function calculateBackupGaps(
 }
 
 /**
- * Constrói resumo de falhas por workload a partir das sessões e lacunas.
+ * Constrói resumo de falhas agrupado por JOB (= cliente).
+ * Cada Job contém workloads internos com seus detalhes.
  */
-export function buildWorkloadSummary(
+export function buildJobSummary(
   sessions: BackupSession[],
-  gaps: BackupGap[]
-): WorkloadFailureSummary[] {
-  const map = new Map<string, WorkloadFailureSummary>();
+  gaps: BackupGap[],
+  jobs: VeeamJob[]
+): JobFailureSummary[] {
+  // Mapa de jobs com seus dados da API
+  const jobStatusMap = new Map<string, VeeamJob>();
+  for (const job of jobs) {
+    jobStatusMap.set(job.name, job);
+  }
 
+  // Mapa de Jobs → WorkloadDetails
+  const jobMap = new Map<string, {
+    jobName: string;
+    jobUid: string;
+    jobStatus: string;
+    lastRunDate?: string;
+    workloadMap: Map<string, WorkloadFailureDetail>;
+  }>();
+
+  // Percorrer sessions e agrupar por Job → Workload
   for (const session of sessions) {
-    const key = `${session.workloadType}::${session.workloadName}`;
-    let summary = map.get(key);
+    const jobKey = session.jobName || "Sem Job";
 
-    if (!summary) {
-      summary = {
+    if (!jobMap.has(jobKey)) {
+      const apiJob = jobStatusMap.get(jobKey);
+      jobMap.set(jobKey, {
+        jobName: jobKey,
+        jobUid: session.jobUid || apiJob?.vmBackupJobUid || "",
+        jobStatus: apiJob?.status || "Unknown",
+        lastRunDate: apiJob?.lastRun,
+        workloadMap: new Map(),
+      });
+    }
+
+    const jobEntry = jobMap.get(jobKey)!;
+    const wlKey = `${session.workloadType}::${session.workloadName}`;
+
+    if (!jobEntry.workloadMap.has(wlKey)) {
+      jobEntry.workloadMap.set(wlKey, {
         workloadName: session.workloadName,
         workloadType: session.workloadType,
-        jobName: session.jobName,
         totalSessions: 0,
         failedCount: 0,
         warningCount: 0,
@@ -1102,42 +1131,51 @@ export function buildWorkloadSummary(
         gaps: [],
         maxGapDays: 0,
         errors: [],
-      };
-      map.set(key, summary);
+      });
     }
 
-    summary.totalSessions++;
+    const wl = jobEntry.workloadMap.get(wlKey)!;
+    wl.totalSessions++;
 
     const statusLower = session.status.toLowerCase();
     if (statusLower === "failed" || statusLower === "error") {
-      summary.failedCount++;
-      if (session.errorMessage && !summary.errors.includes(session.errorMessage)) {
-        summary.errors.push(session.errorMessage);
+      wl.failedCount++;
+      if (session.errorMessage && !wl.errors.includes(session.errorMessage)) {
+        wl.errors.push(session.errorMessage);
       }
     } else if (statusLower === "warning") {
-      summary.warningCount++;
+      wl.warningCount++;
     } else {
-      summary.successCount++;
+      wl.successCount++;
     }
 
-    // Rastrear último backup
     if (session.startTime) {
-      if (!summary.lastBackupDate || session.startTime > summary.lastBackupDate) {
-        summary.lastBackupDate = session.startTime;
+      if (!wl.lastBackupDate || session.startTime > wl.lastBackupDate) {
+        wl.lastBackupDate = session.startTime;
       }
     }
   }
 
-  // Associar gaps
+  // Associar gaps aos workloads dentro dos jobs
   for (const gap of gaps) {
-    const key = `${gap.workloadType}::${gap.workloadName}`;
-    let summary = map.get(key);
+    const jobKey = gap.jobName || "Sem Job";
 
-    if (!summary) {
-      summary = {
+    if (!jobMap.has(jobKey)) {
+      jobMap.set(jobKey, {
+        jobName: jobKey,
+        jobUid: "",
+        jobStatus: "Unknown",
+        workloadMap: new Map(),
+      });
+    }
+
+    const jobEntry = jobMap.get(jobKey)!;
+    const wlKey = `${gap.workloadType}::${gap.workloadName}`;
+
+    if (!jobEntry.workloadMap.has(wlKey)) {
+      jobEntry.workloadMap.set(wlKey, {
         workloadName: gap.workloadName,
         workloadType: gap.workloadType,
-        jobName: gap.jobName,
         totalSessions: 0,
         failedCount: 0,
         warningCount: 0,
@@ -1146,30 +1184,62 @@ export function buildWorkloadSummary(
         gaps: [],
         maxGapDays: 0,
         errors: [],
-      };
-      map.set(key, summary);
+      });
     }
 
-    summary.gaps.push(gap);
-    if (gap.gapDays > summary.maxGapDays) {
-      summary.maxGapDays = gap.gapDays;
-    }
-  }
-
-  // Calcular taxa de falha
-  const summaries = Array.from(map.values());
-  for (const summary of summaries) {
-    if (summary.totalSessions > 0) {
-      summary.failureRate = (summary.failedCount / summary.totalSessions) * 100;
+    const wl = jobEntry.workloadMap.get(wlKey)!;
+    wl.gaps.push(gap);
+    if (gap.gapDays > wl.maxGapDays) {
+      wl.maxGapDays = gap.gapDays;
     }
   }
 
-  return Array.from(map.values()).sort((a, b) => b.failureRate - a.failureRate);
+  // Montar JobFailureSummary[]
+  const result: JobFailureSummary[] = [];
+
+  for (const [, entry] of Array.from(jobMap.entries())) {
+    const workloads = Array.from(entry.workloadMap.values());
+
+    // Calcular taxa de falha por workload
+    for (const wl of workloads) {
+      if (wl.totalSessions > 0) {
+        wl.failureRate = (wl.failedCount / wl.totalSessions) * 100;
+      }
+    }
+
+    // Agregar contadores a nível de Job
+    const totalSessions = workloads.reduce((s, w) => s + w.totalSessions, 0);
+    const failedCount = workloads.reduce((s, w) => s + w.failedCount, 0);
+    const warningCount = workloads.reduce((s, w) => s + w.warningCount, 0);
+    const successCount = workloads.reduce((s, w) => s + w.successCount, 0);
+    const allGapsJob = workloads.flatMap(w => w.gaps);
+    const maxGapDays = workloads.reduce((m, w) => Math.max(m, w.maxGapDays), 0);
+    const allErrors = Array.from(new Set(workloads.flatMap(w => w.errors)));
+
+    result.push({
+      jobName: entry.jobName,
+      jobUid: entry.jobUid,
+      jobStatus: entry.jobStatus,
+      totalWorkloads: workloads.length,
+      totalSessions,
+      failedCount,
+      warningCount,
+      successCount,
+      failureRate: totalSessions > 0 ? (failedCount / totalSessions) * 100 : 0,
+      lastRunDate: entry.lastRunDate,
+      workloads: workloads.sort((a, b) => b.failureRate - a.failureRate),
+      gaps: allGapsJob,
+      maxGapDays,
+      errors: allErrors,
+    });
+  }
+
+  return result.sort((a, b) => b.failureRate - a.failureRate);
 }
 
 /**
  * Função consolidada para buscar todos os dados de falhas e lacunas.
- * Reutiliza autenticação e endpoints existentes.
+ * Agrupado por JOB (= cliente). Reutiliza autenticação e endpoints existentes.
  */
 export async function fetchFailuresData(
   config: VeeamConfig
@@ -1179,7 +1249,14 @@ export async function fetchFailuresData(
   // Autenticar
   const token = await getVeeamToken(apiUrl, username, password);
 
-  // Buscar workloads
+  // Buscar jobs e workloads em paralelo
+  let jobs: VeeamJob[] = [];
+  try {
+    jobs = await getVeeamJobs(apiUrl, token, startDate, endDate);
+  } catch {
+    console.warn("Não foi possível buscar jobs. Continuando sem dados de job.");
+  }
+
   const [vms, computers, fileShares] = await Promise.all([
     getVeeamVMs(apiUrl, token),
     getVeeamComputers(apiUrl, token),
@@ -1224,7 +1301,6 @@ export async function fetchFailuresData(
         }
       }
 
-      // Calcular lacunas
       const vmGaps = calculateBackupGaps(
         backupDates,
         startDate,
@@ -1357,8 +1433,8 @@ export async function fetchFailuresData(
     }
   }
 
-  // Construir resumo por workload
-  const workloadSummary = buildWorkloadSummary(allSessions, allGaps);
+  // Construir resumo por JOB
+  const jobSummary = buildJobSummary(allSessions, allGaps, jobs);
 
   // Contadores
   const failedSessions = allSessions.filter(
@@ -1371,20 +1447,24 @@ export async function fetchFailuresData(
     s => s.status.toLowerCase() === "success"
   ).length;
 
-  const workloadsWithGaps = new Set(allGaps.map(g => `${g.workloadType}::${g.workloadName}`)).size;
+  const jobsWithFailures = jobSummary.filter(j => j.failedCount > 0).length;
+  const jobsWithGaps = jobSummary.filter(j => j.gaps.length > 0).length;
 
   return {
     sessions: allSessions,
     gaps: allGaps,
+    totalJobs: jobSummary.length,
     totalWorkloads: vms.length + computers.length + fileShares.length,
     totalSessions: allSessions.length,
     failedSessions,
     warningSessions,
     successSessions,
-    workloadsWithGaps,
+    jobsWithFailures,
+    jobsWithGaps,
     periodStart: startDate,
     periodEnd: endDate,
-    workloadSummary,
+    jobSummary,
   };
 }
+
 

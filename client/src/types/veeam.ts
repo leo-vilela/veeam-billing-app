@@ -135,11 +135,10 @@ export interface BackupGap {
   jobName: string;
 }
 
-// Resumo de falhas por workload
-export interface WorkloadFailureSummary {
+// Resumo de falhas de um workload DENTRO de um job
+export interface WorkloadFailureDetail {
   workloadName: string;
   workloadType: WorkloadType;
-  jobName: string;
   totalSessions: number;
   failedCount: number;
   warningCount: number;
@@ -151,17 +150,37 @@ export interface WorkloadFailureSummary {
   errors: string[];
 }
 
+// Resumo de falhas de um JOB (= cliente)
+export interface JobFailureSummary {
+  jobName: string;
+  jobUid: string;
+  jobStatus: string;
+  totalWorkloads: number;
+  totalSessions: number;
+  failedCount: number;
+  warningCount: number;
+  successCount: number;
+  failureRate: number;
+  lastRunDate?: string;
+  workloads: WorkloadFailureDetail[];
+  gaps: BackupGap[];
+  maxGapDays: number;
+  errors: string[];
+}
+
 // Dados consolidados de falhas
 export interface FailuresData {
   sessions: BackupSession[];
   gaps: BackupGap[];
+  totalJobs: number;
   totalWorkloads: number;
   totalSessions: number;
   failedSessions: number;
   warningSessions: number;
   successSessions: number;
-  workloadsWithGaps: number;
+  jobsWithFailures: number;
+  jobsWithGaps: number;
   periodStart: string;
   periodEnd: string;
-  workloadSummary: WorkloadFailureSummary[];
+  jobSummary: JobFailureSummary[];
 }
