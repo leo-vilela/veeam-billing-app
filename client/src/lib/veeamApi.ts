@@ -1288,10 +1288,15 @@ export async function fetchFailuresData(
     getVeeamFileShares(apiUrl, token),
   ]);
 
-  // ── Filtrar apenas jobs ativos (excluir Disabled, Idle sem execução, None) ──
+  // ── Filtrar apenas jobs ativos (scheduleEnabled !== false) ──
+  // O campo `status` (Success/Failed/Warning) é o RESULTADO da execução,
+  // não indica se o job está habilitado. O campo correto é `scheduleEnabled`.
   const jobs = allJobs.filter(job => {
-    const st = (job.status || "").toLowerCase();
-    return st !== "disabled" && st !== "none" && st !== "";
+    // Se a API retorna scheduleEnabled, usar como filtro principal
+    if ((job as any).scheduleEnabled === false) return false;
+    // Fallback: se houver campo isEnabled explícito
+    if ((job as any).isEnabled === false) return false;
+    return true;
   });
 
   // ── Sessões reais a partir dos Jobs (status correto) ──

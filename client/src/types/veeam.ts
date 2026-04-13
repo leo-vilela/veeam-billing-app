@@ -22,6 +22,8 @@ export interface VeeamJob {
   lastTransferredDataBytes: number;
   platform: string;
   description?: string;
+  scheduleEnabled?: boolean;
+  nextRun?: string;
 }
 
 export interface VeeamVM {
