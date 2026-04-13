@@ -1238,8 +1238,11 @@ export function buildJobSummary(
     const maxGapDays = workloads.reduce((m, w) => Math.max(m, w.maxGapDays), 0);
     const allErrors = Array.from(new Set(workloads.flatMap(w => w.errors)));
 
-    const inconsistentWorkloads = workloads.filter(w => w.failedCount > 0 || w.warningCount > 0).length;
+    // Inconsistente = job cujo status geral é Success mas tem workloads com falha real
+    // OU job com status Failed/Error
     const workloadsWithFailures = workloads.filter(w => w.failedCount > 0).length;
+    const jobIsFailed = entry.jobStatus.toLowerCase() === 'failed' || entry.jobStatus.toLowerCase() === 'error';
+    const inconsistentWorkloads = jobIsFailed ? 1 : workloadsWithFailures;
 
     result.push({
       jobName: entry.jobName,
@@ -1323,13 +1326,22 @@ export async function fetchFailuresData(
   const computers = allComputers.filter(c => jobNameSet.has(c.jobName || ""));
   const fileShares = allFileShares.filter(f => jobNameSet.has(f.jobName || ""));
 
-  // ── Calcular gaps apenas para workloads do período ──
+  // ── Calcular gaps baseado no lastRun do Job (não no lastProtectedDate) ──
+  // lastProtectedDate da API = data do restore point mais antigo no disco (não a última execução)
+  // O gap correto é: periodEnd - job.lastRun
   const allGaps: BackupGap[] = [];
 
-  // Gaps de VMs
+  // Criar mapa de jobName -> lastRun para calcular gaps por workload
+  const jobLastRunMap = new Map<string, string>();
+  for (const job of jobs) {
+    jobLastRunMap.set(job.name, job.lastRun);
+  }
+
+  // Gaps de VMs — usar lastRun do job como referência
   for (const vm of vms) {
+    const jobLastRun = jobLastRunMap.get(vm.jobName) || vm.lastProtectedDate;
     const vmGaps = calculateBackupGaps(
-      vm.lastProtectedDate,
+      jobLastRun,
       startDate,
       endDate,
       vm.name,
@@ -1339,10 +1351,11 @@ export async function fetchFailuresData(
     allGaps.push(...vmGaps);
   }
 
-  // Gaps de Agents
+  // Gaps de Agents — usar lastRun do job
   for (const comp of computers) {
+    const jobLastRun = jobLastRunMap.get(comp.jobName || "") || comp.lastProtectedDate;
     const agentGaps = calculateBackupGaps(
-      comp.lastProtectedDate,
+      jobLastRun,
       startDate,
       endDate,
       comp.name,
@@ -1352,10 +1365,11 @@ export async function fetchFailuresData(
     allGaps.push(...agentGaps);
   }
 
-  // Gaps de File Shares
+  // Gaps de File Shares — usar lastRun do job
   for (const fs of fileShares) {
+    const jobLastRun = jobLastRunMap.get(fs.jobName || "") || fs.lastProtectedDate;
     const fsGaps = calculateBackupGaps(
-      fs.lastProtectedDate,
+      jobLastRun,
       startDate,
       endDate,
       fs.name,
