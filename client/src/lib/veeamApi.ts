@@ -345,32 +345,22 @@ export async function getVeeamToken(
 
   throw new Error(lastError);
 }
-
 /**
- * Função para obter todos os jobs de backup de VMs
+ * Busca jobs de um tipo específico da API do Veeam ONE.
+ * Fallback silencioso: retorna [] se o endpoint não existir (404/400).
  */
-export async function getVeeamJobs(
+async function fetchJobsByType(
   apiUrl: string,
   token: string,
+  jobType: string,
   startDate?: string,
   endDate?: string
 ): Promise<VeeamJob[]> {
-  const supported = await hasV22BillingEndpoints(apiUrl, {
-    forceRefresh: true,
-    strict: true,
-  });
-  if (!supported) {
-    throw new Error(unsupportedApiMessage());
-  }
-
-  const params = new URLSearchParams({
-    skip: "0",
-    limit: "1000",
-  });
+  const params = new URLSearchParams({ skip: "0", limit: "1000" });
 
   const response = await veeamRequest(
     apiUrl,
-    `/api/v2.2/vbrJobs/vmBackupJobs?${params}`,
+    `/api/v2.2/vbrJobs/${jobType}?${params}`,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -380,21 +370,17 @@ export async function getVeeamJobs(
   );
 
   if (!response.ok) {
+    // Endpoint pode não existir para este tipo de job — fallback silencioso
     if (response.status === 404 || response.status === 400) {
-      const stillSupported = await hasV22BillingEndpoints(apiUrl, {
-        forceRefresh: true,
-        strict: true,
-      });
-      if (!stillSupported) {
-        throw new Error(unsupportedApiMessage());
-      }
+      console.warn(`Endpoint /vbrJobs/${jobType} não disponível (${response.status}). Ignorando.`);
+      return [];
     }
     const errorMessage = await getApiErrorMessage(response);
-    throw new Error(`Erro ao buscar jobs: ${errorMessage}`);
+    throw new Error(`Erro ao buscar jobs (${jobType}): ${errorMessage}`);
   }
 
   const data = await readJsonSafely<any>(response);
-  const jobs = data.items || [];
+  const jobs: VeeamJob[] = data.items || [];
 
   if (!startDate && !endDate) {
     return jobs;
@@ -424,6 +410,39 @@ export async function getVeeamJobs(
 
     return true;
   });
+}
+
+/**
+ * Função para obter todos os jobs de backup (VMs, Agents e File Shares).
+ * Busca os 3 tipos de jobs e unifica os resultados.
+ */
+export async function getVeeamJobs(
+  apiUrl: string,
+  token: string,
+  startDate?: string,
+  endDate?: string
+): Promise<VeeamJob[]> {
+  const supported = await hasV22BillingEndpoints(apiUrl, {
+    forceRefresh: true,
+    strict: true,
+  });
+  if (!supported) {
+    throw new Error(unsupportedApiMessage());
+  }
+
+  const [vmJobs, agentJobs, fsJobs] = await Promise.all([
+    fetchJobsByType(apiUrl, token, "vmBackupJobs", startDate, endDate),
+    fetchJobsByType(apiUrl, token, "agentBackupJobs", startDate, endDate).catch(() => {
+      console.warn("Endpoint agentBackupJobs não disponível. Ignorando.");
+      return [] as VeeamJob[];
+    }),
+    fetchJobsByType(apiUrl, token, "fileShareBackupJobs", startDate, endDate).catch(() => {
+      console.warn("Endpoint fileShareBackupJobs não disponível. Ignorando.");
+      return [] as VeeamJob[];
+    }),
+  ]);
+
+  return [...vmJobs, ...agentJobs, ...fsJobs];
 }
 
 /**
@@ -1259,7 +1278,7 @@ export async function fetchFailuresData(
   const token = await getVeeamToken(apiUrl, username, password);
 
   // Buscar jobs e workloads em paralelo
-  const [jobs, allVMs, allComputers, allFileShares] = await Promise.all([
+  const [allJobs, allVMs, allComputers, allFileShares] = await Promise.all([
     getVeeamJobs(apiUrl, token, startDate, endDate).catch(() => {
       console.warn("Não foi possível buscar jobs. Continuando sem dados de job.");
       return [] as VeeamJob[];
@@ -1268,6 +1287,12 @@ export async function fetchFailuresData(
     getVeeamComputers(apiUrl, token),
     getVeeamFileShares(apiUrl, token),
   ]);
+
+  // ── Filtrar apenas jobs ativos (excluir Disabled, Idle sem execução, None) ──
+  const jobs = allJobs.filter(job => {
+    const st = (job.status || "").toLowerCase();
+    return st !== "disabled" && st !== "none" && st !== "";
+  });
 
   // ── Sessões reais a partir dos Jobs (status correto) ──
   const allSessions: BackupSession[] = jobs.map(job => ({
@@ -1286,7 +1311,7 @@ export async function fetchFailuresData(
     transferredBytes: job.lastTransferredDataBytes || 0,
   }));
 
-  // ── Filtrar workloads apenas pelos Jobs do período ──
+  // ── Filtrar workloads apenas pelos Jobs ativos do período ──
   const jobNameSet = new Set(jobs.map(j => j.name));
 
   const vms = allVMs.filter(vm => jobNameSet.has(vm.jobName));
