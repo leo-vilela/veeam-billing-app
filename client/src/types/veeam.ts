@@ -193,3 +193,40 @@ export interface FailuresData {
   periodEnd: string;
   jobSummary: JobFailureSummary[];
 }
+
+// ── Backup Semanal ──
+
+export interface DailyBackupStatus {
+  date: string;        // "2026-04-01"
+  dayOfWeek: number;   // 0=dom, 1=seg...6=sáb
+  hasBackup: boolean;  // true = RP inferido para este dia
+  inPeriod: boolean;   // dentro do período de 14 dias
+}
+
+export interface WeeklyJobRow {
+  jobName: string;
+  jobStatus: string;
+  totalWorkloads: number;
+  days: DailyBackupStatus[];
+  successDays: number;
+  missingDays: number;
+}
+
+export interface WeekBlock {
+  weekLabel: string;     // "Semana 1 (14/03 - 20/03)"
+  startDate: string;
+  endDate: string;
+  jobs: WeeklyJobRow[];
+}
+
+export interface WeeklyBackupData {
+  weeks: WeekBlock[];
+  totalJobs: number;
+  totalDays: number;
+  totalSuccessDays: number;
+  totalMissingDays: number;
+  coverageRate: number;    // % de dias com backup
+  periodStart: string;
+  periodEnd: string;
+}
+

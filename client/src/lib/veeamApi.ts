@@ -12,6 +12,10 @@ import {
   JobFailureSummary,
   WorkloadFailureDetail,
   WorkloadType,
+  DailyBackupStatus,
+  WeeklyJobRow,
+  WeekBlock,
+  WeeklyBackupData,
 } from "@/types/veeam";
 
 const capabilityCache = new Map<string, boolean>();
@@ -1412,5 +1416,190 @@ export async function fetchFailuresData(
     periodStart: startDate,
     periodEnd: endDate,
     jobSummary,
+  };
+}
+
+/**
+ * Gera dados do Backup Semanal (14 dias) usando inferência de restore points.
+ * Para cada VM, infere quais dias tiveram backup usando restorePoints + lastProtectedDate.
+ */
+export async function fetchWeeklyBackupData(
+  config: VeeamConfig
+): Promise<WeeklyBackupData> {
+  const { apiUrl, username, password } = config;
+  const token = await getVeeamToken(apiUrl, username, password);
+
+  // Período fixo: últimos 14 dias a partir de hoje
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+  const fourteenDaysAgo = new Date(today);
+  fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 13);
+  fourteenDaysAgo.setHours(0, 0, 0, 0);
+
+  const periodStart = fourteenDaysAgo.toISOString().split("T")[0];
+  const periodEnd = today.toISOString().split("T")[0];
+
+  // Gerar array de 14 dias
+  const allDates: string[] = [];
+  for (let d = new Date(fourteenDaysAgo); d <= today; d.setDate(d.getDate() + 1)) {
+    allDates.push(d.toISOString().split("T")[0]);
+  }
+
+  // Buscar jobs e workloads
+  const [jobs, allVMs] = await Promise.all([
+    getVeeamJobs(apiUrl, token).catch(() => [] as VeeamJob[]),
+    getVeeamVMs(apiUrl, token),
+  ]);
+
+  // Mapa jobName -> VMs
+  const jobVMsMap = new Map<string, VeeamVM[]>();
+  for (const vm of allVMs) {
+    if (!vm.jobName) continue;
+    if (!jobVMsMap.has(vm.jobName)) jobVMsMap.set(vm.jobName, []);
+    jobVMsMap.get(vm.jobName)!.push(vm);
+  }
+
+  // Para cada job, buscar restore points das VMs e inferir datas
+  const weeklyRows: WeeklyJobRow[] = [];
+
+  // Processar em lotes de 5 jobs
+  const BATCH_SIZE = 5;
+  for (let i = 0; i < jobs.length; i += BATCH_SIZE) {
+    const batch = jobs.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.all(
+      batch.map(async (job) => {
+        const jobUid = job.vmBackupJobUid || job.agentBackupJobUid || "";
+        const vmsForJob = jobVMsMap.get(job.name) || [];
+
+        // Coletar datas com backup (union de todos os RPs de todas VMs do job)
+        const backupDatesSet = new Set<string>();
+
+        for (const vm of vmsForJob) {
+          try {
+            const bkResp = await veeamRequest(
+              apiUrl,
+              `/api/v2.2/protectedData/virtualMachines/${vm.vmUidInVbr}/backups?skip=0&limit=10`,
+              {
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+              }
+            );
+            if (bkResp.ok) {
+              const bkData = await readJsonSafely<any>(bkResp);
+              for (const bk of bkData.items || []) {
+                const rpCount = Number(bk.restorePoints) || 0;
+                const lastProt = bk.lastProtectedDate;
+                if (lastProt && rpCount > 0) {
+                  // Inferir datas retroativas a partir de lastProtectedDate
+                  const lpDate = new Date(lastProt);
+                  for (let d = 0; d < rpCount; d++) {
+                    const rpDate = new Date(lpDate);
+                    rpDate.setDate(rpDate.getDate() - d);
+                    backupDatesSet.add(rpDate.toISOString().split("T")[0]);
+                  }
+                }
+              }
+            }
+          } catch {
+            // Ignorar VMs com erro
+          }
+        }
+
+        // Se não temos VMs, usar lastRun do job como fallback
+        if (vmsForJob.length === 0 && job.lastRun) {
+          const lastRunDate = new Date(job.lastRun).toISOString().split("T")[0];
+          backupDatesSet.add(lastRunDate);
+        }
+
+        // Construir array de dias para este job
+        const days: DailyBackupStatus[] = allDates.map(date => {
+          const d = new Date(date + "T12:00:00Z");
+          return {
+            date,
+            dayOfWeek: d.getDay(),
+            hasBackup: backupDatesSet.has(date),
+            inPeriod: true,
+          };
+        });
+
+        const successDays = days.filter(d => d.hasBackup).length;
+        const missingDays = days.filter(d => !d.hasBackup).length;
+
+        return {
+          jobName: job.name,
+          jobStatus: job.status || "Unknown",
+          totalWorkloads: vmsForJob.length,
+          days,
+          successDays,
+          missingDays,
+        } as WeeklyJobRow;
+      })
+    );
+    weeklyRows.push(...batchResults);
+  }
+
+  // Agrupar por semana (seg-dom)
+  const weeks: WeekBlock[] = [];
+  let weekStart = new Date(fourteenDaysAgo);
+  // Ajustar para segunda-feira
+  const dayOfWeek = weekStart.getDay();
+  const mondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+  weekStart.setDate(weekStart.getDate() + mondayOffset);
+
+  while (weekStart <= today) {
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+
+    const wsStr = weekStart.toISOString().split("T")[0];
+    const weStr = weekEnd.toISOString().split("T")[0];
+
+    const formatBR = (d: Date) => {
+      const dd = String(d.getDate()).padStart(2, "0");
+      const mm = String(d.getMonth() + 1).padStart(2, "0");
+      return `${dd}/${mm}`;
+    };
+
+    const weekLabel = `Semana (${formatBR(weekStart)} - ${formatBR(weekEnd)})`;
+
+    // Filtrar dias de cada job para esta semana
+    const weekJobs: WeeklyJobRow[] = weeklyRows.map(row => {
+      const weekDays = row.days.filter(d => d.date >= wsStr && d.date <= weStr);
+      return {
+        ...row,
+        days: weekDays,
+        successDays: weekDays.filter(d => d.hasBackup).length,
+        missingDays: weekDays.filter(d => !d.hasBackup).length,
+      };
+    });
+
+    // Só incluir semana se tem pelo menos 1 dia no período
+    if (weekJobs.some(j => j.days.length > 0)) {
+      weeks.push({
+        weekLabel,
+        startDate: wsStr,
+        endDate: weStr,
+        jobs: weekJobs,
+      });
+    }
+
+    weekStart.setDate(weekStart.getDate() + 7);
+  }
+
+  // Totais
+  const totalDays = weeklyRows.reduce((s, r) => s + r.days.length, 0);
+  const totalSuccessDays = weeklyRows.reduce((s, r) => s + r.successDays, 0);
+  const totalMissingDays = weeklyRows.reduce((s, r) => s + r.missingDays, 0);
+
+  return {
+    weeks,
+    totalJobs: jobs.length,
+    totalDays,
+    totalSuccessDays,
+    totalMissingDays,
+    coverageRate: totalDays > 0 ? (totalSuccessDays / totalDays) * 100 : 0,
+    periodStart,
+    periodEnd,
   };
 }

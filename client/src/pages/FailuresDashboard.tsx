@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -31,7 +31,8 @@ import {
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
-import { FailuresData, VeeamConfig, JobFailureSummary } from "@/types/veeam";
+import { FailuresData, VeeamConfig, JobFailureSummary, WeeklyBackupData } from "@/types/veeam";
+import { fetchWeeklyBackupData } from "@/lib/veeamApi";
 
 interface FailuresDashboardProps {
   failuresData: FailuresData;
@@ -78,6 +79,10 @@ export default function FailuresDashboard({
 }: FailuresDashboardProps) {
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
   const [activeGapFilter, setActiveGapFilter] = useState<string>("all");
+  const [weeklyData, setWeeklyData] = useState<WeeklyBackupData | null>(null);
+  const [weeklyLoading, setWeeklyLoading] = useState(false);
+  const [weeklyError, setWeeklyError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState("overview");
 
   const totalRate = failuresData.totalSessions > 0
     ? ((failuresData.successSessions / failuresData.totalSessions) * 100).toFixed(1)
@@ -316,12 +321,23 @@ export default function FailuresDashboard({
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="overview" className="space-y-4">
+        <Tabs value={activeTab} onValueChange={(val) => {
+          setActiveTab(val);
+          if (val === "weekly" && !weeklyData && !weeklyLoading) {
+            setWeeklyLoading(true);
+            setWeeklyError(null);
+            fetchWeeklyBackupData(config)
+              .then(data => setWeeklyData(data))
+              .catch(err => setWeeklyError(err.message))
+              .finally(() => setWeeklyLoading(false));
+          }
+        }} className="space-y-4">
           <TabsList>
             <TabsTrigger value="overview">Visão Geral</TabsTrigger>
             <TabsTrigger value="jobs">Falhas por Job</TabsTrigger>
             <TabsTrigger value="gaps">Lacunas de Backup</TabsTrigger>
             <TabsTrigger value="sessions">Todas as Sessões</TabsTrigger>
+            <TabsTrigger value="weekly">📅 Backup Semanal</TabsTrigger>
           </TabsList>
 
           {/* ── Overview Tab ── */}
@@ -790,6 +806,179 @@ export default function FailuresDashboard({
                 </div>
               </CardContent>
             </Card>
+          </TabsContent>
+
+          {/* ── Backup Semanal Tab ── */}
+          <TabsContent value="weekly" className="space-y-4">
+            {weeklyLoading ? (
+              <Card>
+                <CardContent className="py-16 text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-4"></div>
+                  <p className="text-muted-foreground">Carregando dados semanais... Isso pode levar alguns segundos.</p>
+                </CardContent>
+              </Card>
+            ) : weeklyError ? (
+              <Card>
+                <CardContent className="py-16 text-center">
+                  <XCircle className="h-8 w-8 text-destructive mx-auto mb-4" />
+                  <p className="text-destructive">{weeklyError}</p>
+                </CardContent>
+              </Card>
+            ) : weeklyData ? (
+              <>
+                {/* KPI resumo */}
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Jobs Analisados</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">{weeklyData.totalJobs}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Período</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold">14 dias</div>
+                      <p className="text-xs text-muted-foreground">{weeklyData.periodStart} a {weeklyData.periodEnd}</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Cobertura de Backup</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-emerald-600">{weeklyData.coverageRate.toFixed(1)}%</div>
+                      <p className="text-xs text-muted-foreground">{weeklyData.totalSuccessDays} dias com backup</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-muted-foreground">Dias sem Backup</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-2xl font-bold text-red-600">{weeklyData.totalMissingDays}</div>
+                      <p className="text-xs text-muted-foreground">falhas detectadas</p>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                {/* Aviso */}
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800 flex items-start gap-2">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                  <span>Dados inferidos a partir dos restore points disponíveis (últimos 14 dias). Dias sem backup podem indicar falha na execução ou expiração do restore point.</span>
+                </div>
+
+                {/* Tabelas semanais */}
+                {weeklyData.weeks.map((week, wi) => (
+                  <Card key={wi}>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-base">{week.weekLabel}</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="border-b">
+                              <th className="text-left py-2 px-3 font-medium min-w-[250px]">Job / Cliente</th>
+                              <th className="text-center py-2 px-2 font-medium w-10">WL</th>
+                              {(() => {
+                                const dayLabels = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+                                const headers = [];
+                                const ws = new Date(week.startDate + "T12:00:00Z");
+                                for (let d = 0; d < 7; d++) {
+                                  const dayDate = new Date(ws);
+                                  dayDate.setDate(dayDate.getDate() + d);
+                                  const dateStr = dayDate.toISOString().split("T")[0];
+                                  const dayOfWeek = dayDate.getDay();
+                                  const dd = String(dayDate.getDate()).padStart(2, "0");
+                                  const mm = String(dayDate.getMonth() + 1).padStart(2, "0");
+                                  headers.push(
+                                    <th key={d} className="text-center py-2 px-1 font-medium w-12">
+                                      <div className="text-xs text-muted-foreground">{dayLabels[dayOfWeek]}</div>
+                                      <div className="text-xs">{dd}/{mm}</div>
+                                    </th>
+                                  );
+                                }
+                                return headers;
+                              })()}
+                              <th className="text-center py-2 px-2 font-medium w-12">✅</th>
+                              <th className="text-center py-2 px-2 font-medium w-12">❌</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {week.jobs.map((job, ji) => {
+                              // Build day map for this week
+                              const dayMap = new Map<string, boolean>();
+                              for (const d of job.days) {
+                                dayMap.set(d.date, d.hasBackup);
+                              }
+
+                              return (
+                                <tr key={ji} className="border-b last:border-0 hover:bg-muted/30">
+                                  <td className="py-2 px-3 font-medium truncate max-w-[250px]" title={job.jobName}>
+                                    {job.jobName}
+                                  </td>
+                                  <td className="text-center py-2 px-2 text-muted-foreground text-xs">
+                                    {job.totalWorkloads}
+                                  </td>
+                                  {(() => {
+                                    const cells = [];
+                                    const ws2 = new Date(week.startDate + "T12:00:00Z");
+                                    for (let d = 0; d < 7; d++) {
+                                      const dayDate = new Date(ws2);
+                                      dayDate.setDate(dayDate.getDate() + d);
+                                      const dateStr = dayDate.toISOString().split("T")[0];
+                                      const hasBackup = dayMap.get(dateStr);
+
+                                      if (hasBackup === undefined) {
+                                        // Fora do período
+                                        cells.push(
+                                          <td key={d} className="text-center py-2 px-1">
+                                            <span className="inline-block w-5 h-5 rounded bg-gray-100 dark:bg-gray-800"></span>
+                                          </td>
+                                        );
+                                      } else if (hasBackup) {
+                                        cells.push(
+                                          <td key={d} className="text-center py-2 px-1">
+                                            <span className="inline-block w-5 h-5 rounded-full bg-emerald-500" title={`Backup OK em ${dateStr}`}></span>
+                                          </td>
+                                        );
+                                      } else {
+                                        cells.push(
+                                          <td key={d} className="text-center py-2 px-1">
+                                            <span className="inline-block w-5 h-5 rounded-full bg-red-500" title={`Sem backup em ${dateStr}`}></span>
+                                          </td>
+                                        );
+                                      }
+                                    }
+                                    return cells;
+                                  })()}
+                                  <td className="text-center py-2 px-2 text-emerald-600 font-semibold text-xs">
+                                    {job.successDays}
+                                  </td>
+                                  <td className="text-center py-2 px-2 text-red-600 font-semibold text-xs">
+                                    {job.missingDays}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </>
+            ) : (
+              <Card>
+                <CardContent className="py-16 text-center">
+                  <p className="text-muted-foreground">Clique na aba para carregar os dados semanais.</p>
+                </CardContent>
+              </Card>
+            )}
           </TabsContent>
 
         </Tabs>
