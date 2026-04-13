@@ -25,6 +25,7 @@ export interface VeeamJob {
   scheduleEnabled?: boolean;
   nextRun?: string;
   agentBackupJobUid?: string;
+  details?: string[];
 }
 
 export interface VeeamVM {

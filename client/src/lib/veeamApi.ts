@@ -1302,96 +1302,102 @@ export async function fetchFailuresData(
   const getJobUid = (job: VeeamJob): string =>
     job.vmBackupJobUid || job.agentBackupJobUid || (job as any).fileShareBackupJobUid || "";
 
-  // ── Sessões reais a partir dos Jobs (status correto) ──
-  const allSessions: BackupSession[] = jobs.map(job => {
-    const uid = getJobUid(job);
-    const isAgent = !!job.agentBackupJobUid && !job.vmBackupJobUid;
-    return {
-      sessionId: uid,
-      jobName: job.name,
-      jobUid: uid,
-      workloadName: job.name,
-      workloadType: (isAgent ? "agent" : "vm") as WorkloadType,
-      status: job.status || "Unknown",
-      startTime: job.lastRun || "",
-      endTime: "",
-      durationSec: job.lastRunDurationSec || 0,
-      errorMessage: (job.status || "").toLowerCase() === "failed"
-        ? `Job "${job.name}" falhou na última execução`
-        : undefined,
-      transferredBytes: job.lastTransferredDataBytes || 0,
-    };
-  });
-
   // ── Filtrar workloads apenas pelos Jobs ativos do período ──
   const jobNameSet = new Set(jobs.map(j => j.name));
-
   const vms = allVMs.filter(vm => jobNameSet.has(vm.jobName));
   const computers = allComputers.filter(c => jobNameSet.has(c.jobName || ""));
   const fileShares = allFileShares.filter(f => jobNameSet.has(f.jobName || ""));
 
-  // ── Calcular gaps baseado no lastRun do Job (não no lastProtectedDate) ──
-  // lastProtectedDate da API = data do restore point mais antigo no disco (não a última execução)
-  // O gap correto é: periodEnd - job.lastRun
-  const allGaps: BackupGap[] = [];
-
-  // Criar mapa de jobName -> lastRun para calcular gaps por workload
+  // ── Mapa de jobName -> lastRun para gaps (BUG 7: Running = data de hoje) ──
   const jobLastRunMap = new Map<string, string>();
   for (const job of jobs) {
-    jobLastRunMap.set(job.name, job.lastRun);
+    if (job.lastRun) {
+      const isRunning = job.status?.toLowerCase() === "running";
+      jobLastRunMap.set(job.name, isRunning ? new Date().toISOString() : job.lastRun);
+    }
   }
 
-  // Gaps de VMs — usar lastRun do job como referência
-  for (const vm of vms) {
-    const jobLastRun = jobLastRunMap.get(vm.jobName) || vm.lastProtectedDate;
-    const vmGaps = calculateBackupGaps(
-      jobLastRun,
-      startDate,
-      endDate,
-      vm.name,
-      "vm",
-      vm.jobName || "N/A"
-    );
-    allGaps.push(...vmGaps);
-  }
+  // ── Construir Sessões e Gaps consolidados ──
+  const allSessions: BackupSession[] = [];
+  const allGaps: BackupGap[] = [];
 
-  // Gaps de Agents — usar lastRun do job
-  for (const comp of computers) {
-    const jobLastRun = jobLastRunMap.get(comp.jobName || "") || comp.lastProtectedDate;
-    const agentGaps = calculateBackupGaps(
-      jobLastRun,
-      startDate,
-      endDate,
-      comp.name,
-      "agent",
-      comp.jobName || "N/A"
-    );
-    allGaps.push(...agentGaps);
-  }
+  for (const job of jobs) {
+    const jobUid = getJobUid(job);
+    const isAgent = !!job.agentBackupJobUid && !job.vmBackupJobUid;
+    const isFileShare = !!(job as any).fileShareBackupJobUid;
+    const defaultWType: WorkloadType = isAgent ? "agent" : isFileShare ? "fileshare" : "vm";
+    
+    // Workloads deste job
+    const jobVms = vms.filter(v => v.jobName === job.name);
+    const jobComps = computers.filter(c => c.jobName === job.name);
+    const jobFs = fileShares.filter(f => f.jobName === job.name);
+    
+    const workloadsForJob = [
+      ...jobVms.map(v => ({ name: v.name, type: "vm" as WorkloadType, uid: v.vmUidInVbr, lastProt: v.lastProtectedDate })),
+      ...jobComps.map(c => ({ name: c.name, type: "agent" as WorkloadType, uid: c.computerUid || c.name, lastProt: c.lastProtectedDate })),
+      ...jobFs.map(f => ({ name: f.name, type: "fileshare" as WorkloadType, uid: (f as any).fileShareUid || f.name, lastProt: (f as any).lastProtectedDate }))
+    ];
 
-  // Gaps de File Shares — usar lastRun do job
-  for (const fs of fileShares) {
-    const jobLastRun = jobLastRunMap.get(fs.jobName || "") || fs.lastProtectedDate;
-    const fsGaps = calculateBackupGaps(
-      jobLastRun,
-      startDate,
-      endDate,
-      fs.name,
-      "fileshare",
-      fs.jobName || "N/A"
-    );
-    allGaps.push(...fsGaps);
+    const jobSt = (job.status || "Unknown").toLowerCase();
+    const isFailed = jobSt === "failed" || jobSt === "error";
+    // BUG 6: Erro real vindo da API
+    const errorMessage = isFailed
+      ? (job.details && job.details.length > 0 ? job.details[0] : `Job "${job.name}" falhou`)
+      : undefined;
+
+    if (workloadsForJob.length === 0) {
+      // 🔴 BUG 1 FIX: Workload sintético para Job Órfão
+      allSessions.push({
+        sessionId: jobUid,
+        jobName: job.name,
+        jobUid: jobUid,
+        workloadName: job.name, 
+        workloadType: defaultWType,
+        status: job.status || "Unknown",
+        startTime: job.lastRun || "",
+        endTime: "",
+        durationSec: job.lastRunDurationSec || 0,
+        errorMessage,
+      });
+
+      // Gerar gap sintético
+      const gapLastRun = jobLastRunMap.get(job.name) || job.lastRun;
+      allGaps.push(...calculateBackupGaps(gapLastRun, startDate, endDate, job.name, defaultWType, job.name));
+    } else {
+      // 🔴 BUG 2 FIX: Uma sessão por workload, mas com o status unificado do Job
+      for (const w of workloadsForJob) {
+        allSessions.push({
+          sessionId: `${jobUid}-${w.uid}`,
+          jobName: job.name,
+          jobUid: jobUid,
+          workloadName: w.name,
+          workloadType: w.type,
+          status: job.status || "Unknown",
+          startTime: job.lastRun || "",
+          endTime: "",
+          durationSec: job.lastRunDurationSec || 0,
+          errorMessage,
+        });
+
+        // ── Calcular Gap deste workload ──
+        const workloadLastRun = jobLastRunMap.get(job.name) || w.lastProt;
+        allGaps.push(...calculateBackupGaps(workloadLastRun, startDate, endDate, w.name, w.type, job.name));
+      }
+    }
   }
 
   // Construir resumo por JOB
   const jobSummary = buildJobSummary(allSessions, allGaps, jobs);
 
-  // Contadores diretos dos jobs (status real)
+  // Contadores diretos das sessões
   let failedSessions = 0;
   let warningSessions = 0;
   let successSessions = 0;
   for (const s of allSessions) {
     const st = s.status.toLowerCase();
+    // 🟡 BUG 3 FIX: Ignorar 'running' para não inflar as contagens nem taxas
+    if (st === "running") continue; 
+    
     if (st === "failed" || st === "error") failedSessions++;
     else if (st === "warning") warningSessions++;
     else if (st === "success") successSessions++;

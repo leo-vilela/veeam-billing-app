@@ -68,6 +68,9 @@ function getStatusBadge(status: string, inconsistent?: boolean) {
   if (s === "failed" || s === "error") {
     return <Badge className="bg-red-500/10 text-red-600 border-red-200 hover:bg-red-500/20">{status}</Badge>;
   }
+  if (s === "running") {
+    return <Badge className="bg-blue-500/10 text-blue-600 border-blue-200 hover:bg-blue-500/20">Em Execução</Badge>;
+  }
   return <Badge variant="secondary">{status}</Badge>;
 }
 
@@ -608,7 +611,7 @@ export default function FailuresDashboard({
                                     ) : "—"}
                                   </td>
                                   <td className="py-1.5 px-2 text-right text-xs">
-                                    {wl.lastProtectedDate ? new Date(wl.lastProtectedDate).toLocaleString() : "—"}
+                                    {wl.lastBackupDate ? new Date(wl.lastBackupDate).toLocaleString() : "—"}
                                   </td>
                                   <td className="py-1.5 px-2 text-xs max-w-[180px] truncate" title={wl.errors.join("; ")}>
                                     {wl.errors.length > 0 ? (
@@ -687,7 +690,7 @@ export default function FailuresDashboard({
                     <tbody>
                       {filteredGaps.length === 0 ? (
                         <tr>
-                          <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                          <td colSpan={7} className="py-8 text-center text-muted-foreground">
                             Nenhuma lacuna encontrada{activeGapFilter !== "all" ? ` para ${WORKLOAD_LABELS[activeGapFilter]}` : ""}. 🎉
                           </td>
                         </tr>
