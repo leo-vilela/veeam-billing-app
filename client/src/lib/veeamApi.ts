@@ -1288,15 +1288,18 @@ export async function fetchFailuresData(
     getVeeamFileShares(apiUrl, token),
   ]);
 
-  // ── Filtrar apenas jobs ativos (scheduleEnabled !== false) ──
-  // O campo `status` (Success/Failed/Warning) é o RESULTADO da execução,
-  // não indica se o job está habilitado. O campo correto é `scheduleEnabled`.
+  // ── Filtrar apenas jobs ativos (lastRun nos últimos 30 dias do período) ──
+  const INACTIVITY_DAYS = 30;
+  const periodEndDate = new Date(endDate + "T23:59:59Z");
+  const inactivityThreshold = new Date(periodEndDate);
+  inactivityThreshold.setDate(inactivityThreshold.getDate() - INACTIVITY_DAYS);
+
   const jobs = allJobs.filter(job => {
-    // Se a API retorna scheduleEnabled, usar como filtro principal
-    if ((job as any).scheduleEnabled === false) return false;
-    // Fallback: se houver campo isEnabled explícito
-    if ((job as any).isEnabled === false) return false;
-    return true;
+    if (!job.lastRun) return false;
+    const lastRun = new Date(job.lastRun);
+    if (Number.isNaN(lastRun.getTime())) return false;
+    // Job inativo = lastRun anterior ao limiar de 30 dias antes do fim do período
+    return lastRun >= inactivityThreshold;
   });
 
   // ── Sessões reais a partir dos Jobs (status correto) ──
