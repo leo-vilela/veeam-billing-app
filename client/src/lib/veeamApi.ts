@@ -1288,36 +1288,33 @@ export async function fetchFailuresData(
     getVeeamFileShares(apiUrl, token),
   ]);
 
-  // ── Filtrar apenas jobs ativos (lastRun nos últimos 30 dias do período) ──
-  const INACTIVITY_DAYS = 30;
-  const periodEndDate = new Date(endDate + "T23:59:59Z");
-  const inactivityThreshold = new Date(periodEndDate);
-  inactivityThreshold.setDate(inactivityThreshold.getDate() - INACTIVITY_DAYS);
+  // ── Usar todos os jobs retornados (já filtrados por período em getVeeamJobs) ──
+  const jobs = allJobs;
 
-  const jobs = allJobs.filter(job => {
-    if (!job.lastRun) return false;
-    const lastRun = new Date(job.lastRun);
-    if (Number.isNaN(lastRun.getTime())) return false;
-    // Job inativo = lastRun anterior ao limiar de 30 dias antes do fim do período
-    return lastRun >= inactivityThreshold;
-  });
+  // Helper: extrair UID do job independente do tipo (VM ou Agent)
+  const getJobUid = (job: VeeamJob): string =>
+    job.vmBackupJobUid || job.agentBackupJobUid || (job as any).fileShareBackupJobUid || "";
 
   // ── Sessões reais a partir dos Jobs (status correto) ──
-  const allSessions: BackupSession[] = jobs.map(job => ({
-    sessionId: job.vmBackupJobUid,
-    jobName: job.name,
-    jobUid: job.vmBackupJobUid,
-    workloadName: job.name,
-    workloadType: "vm" as WorkloadType,
-    status: job.status || "Unknown",
-    startTime: job.lastRun || "",
-    endTime: "",
-    durationSec: job.lastRunDurationSec || 0,
-    errorMessage: (job.status || "").toLowerCase() === "failed"
-      ? `Job "${job.name}" falhou na última execução`
-      : undefined,
-    transferredBytes: job.lastTransferredDataBytes || 0,
-  }));
+  const allSessions: BackupSession[] = jobs.map(job => {
+    const uid = getJobUid(job);
+    const isAgent = !!job.agentBackupJobUid && !job.vmBackupJobUid;
+    return {
+      sessionId: uid,
+      jobName: job.name,
+      jobUid: uid,
+      workloadName: job.name,
+      workloadType: (isAgent ? "agent" : "vm") as WorkloadType,
+      status: job.status || "Unknown",
+      startTime: job.lastRun || "",
+      endTime: "",
+      durationSec: job.lastRunDurationSec || 0,
+      errorMessage: (job.status || "").toLowerCase() === "failed"
+        ? `Job "${job.name}" falhou na última execução`
+        : undefined,
+      transferredBytes: job.lastTransferredDataBytes || 0,
+    };
+  });
 
   // ── Filtrar workloads apenas pelos Jobs ativos do período ──
   const jobNameSet = new Set(jobs.map(j => j.name));
