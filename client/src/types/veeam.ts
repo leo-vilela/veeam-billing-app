@@ -1,11 +1,15 @@
 // Tipos para a API do Veeam ONE
 
+// Modo de operação da aplicação
+export type AppMode = "billing" | "failures";
+
 export interface VeeamConfig {
   apiUrl: string;
   username: string;
   password: string;
   startDate: string;
   endDate: string;
+  mode: AppMode;
 }
 
 export interface VeeamJob {
@@ -100,4 +104,64 @@ export interface ApiResponse<T> {
   data?: T;
   error?: string;
   message?: string;
+}
+
+// ─── Tipos para Relatório de Falhas e Lacunas ───
+
+export type WorkloadType = "vm" | "agent" | "fileshare";
+
+// Sessão de backup com detalhes de falha
+export interface BackupSession {
+  sessionId: string;
+  jobName: string;
+  jobUid: string;
+  workloadName: string;
+  workloadType: WorkloadType;
+  status: string;
+  startTime: string;
+  endTime?: string;
+  durationSec: number;
+  errorMessage?: string;
+  transferredBytes?: number;
+}
+
+// Lacuna (gap) de backup por workload
+export interface BackupGap {
+  workloadName: string;
+  workloadType: WorkloadType;
+  gapStart: string;
+  gapEnd: string;
+  gapDays: number;
+  jobName: string;
+}
+
+// Resumo de falhas por workload
+export interface WorkloadFailureSummary {
+  workloadName: string;
+  workloadType: WorkloadType;
+  jobName: string;
+  totalSessions: number;
+  failedCount: number;
+  warningCount: number;
+  successCount: number;
+  failureRate: number;
+  lastBackupDate?: string;
+  gaps: BackupGap[];
+  maxGapDays: number;
+  errors: string[];
+}
+
+// Dados consolidados de falhas
+export interface FailuresData {
+  sessions: BackupSession[];
+  gaps: BackupGap[];
+  totalWorkloads: number;
+  totalSessions: number;
+  failedSessions: number;
+  warningSessions: number;
+  successSessions: number;
+  workloadsWithGaps: number;
+  periodStart: string;
+  periodEnd: string;
+  workloadSummary: WorkloadFailureSummary[];
 }

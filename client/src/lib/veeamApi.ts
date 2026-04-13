@@ -6,6 +6,11 @@ import {
   VeeamComputer,
   VeeamFileShare,
   VeeamBackup,
+  FailuresData,
+  BackupSession,
+  BackupGap,
+  WorkloadFailureSummary,
+  WorkloadType,
 } from "@/types/veeam";
 
 const capabilityCache = new Map<string, boolean>();
@@ -248,6 +253,34 @@ function toEndOfDay(dateString: string): Date {
   const date = new Date(dateString);
   date.setHours(23, 59, 59, 999);
   return date;
+}
+
+/**
+ * Filtra um array de backups (qualquer formato) pelo período informado.
+ * Usa os campos creationTime ou backupDate do objeto.
+ */
+function filterBackupsByDate(
+  backups: any[],
+  startDate?: string,
+  endDate?: string
+): any[] {
+  if (!startDate && !endDate) return backups;
+
+  const start = startDate ? toStartOfDay(startDate) : null;
+  const end = endDate ? toEndOfDay(endDate) : null;
+
+  return backups.filter((backup: any) => {
+    const dateStr = backup.creationTime || backup.backupDate;
+    if (!dateStr) return false;
+
+    const backupDate = new Date(dateStr);
+    if (Number.isNaN(backupDate.getTime())) return false;
+
+    if (start && backupDate < start) return false;
+    if (end && backupDate > end) return false;
+
+    return true;
+  });
 }
 
 /**
@@ -851,7 +884,7 @@ export async function fetchBillingData(
       );
       if (resp.ok) {
         const data = await readJsonSafely<any>(resp);
-        const backups: any[] = data.items || [];
+        const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
         allBackups.push(
           ...backups.map((backup: any) => ({
             backupUid: backup.uid,
@@ -884,7 +917,7 @@ export async function fetchBillingData(
       );
       if (resp.ok) {
         const data = await readJsonSafely<any>(resp);
-        const backups: any[] = data.items || [];
+        const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
         allBackups.push(
           ...backups.map((backup: any) => ({
             backupUid: backup.uid,
@@ -958,3 +991,400 @@ export function calculateBilling(
   const totalGB = totalVolumeBytes / (1024 * 1024 * 1024);
   return totalGB * pricePerGB;
 }
+
+// ─── Funções para Relatório de Falhas e Lacunas ───
+
+/**
+ * Calcula lacunas (gaps) de backup para um workload no período selecionado.
+ * Um gap é definido como um período de 1+ dias consecutivos sem nenhum backup.
+ */
+export function calculateBackupGaps(
+  backupDates: string[],
+  periodStart: string,
+  periodEnd: string,
+  workloadName: string,
+  workloadType: WorkloadType,
+  jobName: string
+): BackupGap[] {
+  const start = toStartOfDay(periodStart);
+  const end = toEndOfDay(periodEnd);
+
+  // Criar set de dias com backup (formato YYYY-MM-DD)
+  const daysWithBackup = new Set<string>();
+  for (const dateStr of backupDates) {
+    const d = new Date(dateStr);
+    if (!Number.isNaN(d.getTime())) {
+      daysWithBackup.add(d.toISOString().split("T")[0]);
+    }
+  }
+
+  const gaps: BackupGap[] = [];
+  let gapStart: Date | null = null;
+
+  const current = new Date(start);
+  while (current <= end) {
+    const dayKey = current.toISOString().split("T")[0];
+
+    if (!daysWithBackup.has(dayKey)) {
+      if (!gapStart) {
+        gapStart = new Date(current);
+      }
+    } else {
+      if (gapStart) {
+        const gapEndDate = new Date(current);
+        gapEndDate.setDate(gapEndDate.getDate() - 1);
+        const gapDays = Math.ceil(
+          (gapEndDate.getTime() - gapStart.getTime()) / (1000 * 60 * 60 * 24)
+        ) + 1;
+
+        if (gapDays >= 1) {
+          gaps.push({
+            workloadName,
+            workloadType,
+            gapStart: gapStart.toISOString().split("T")[0],
+            gapEnd: gapEndDate.toISOString().split("T")[0],
+            gapDays,
+            jobName,
+          });
+        }
+        gapStart = null;
+      }
+    }
+
+    current.setDate(current.getDate() + 1);
+  }
+
+  // Fechar gap que vai até o final do período
+  if (gapStart) {
+    const gapDays = Math.ceil(
+      (end.getTime() - gapStart.getTime()) / (1000 * 60 * 60 * 24)
+    ) + 1;
+
+    if (gapDays >= 1) {
+      gaps.push({
+        workloadName,
+        workloadType,
+        gapStart: gapStart.toISOString().split("T")[0],
+        gapEnd: end.toISOString().split("T")[0],
+        gapDays,
+        jobName,
+      });
+    }
+  }
+
+  return gaps;
+}
+
+/**
+ * Constrói resumo de falhas por workload a partir das sessões e lacunas.
+ */
+export function buildWorkloadSummary(
+  sessions: BackupSession[],
+  gaps: BackupGap[]
+): WorkloadFailureSummary[] {
+  const map = new Map<string, WorkloadFailureSummary>();
+
+  for (const session of sessions) {
+    const key = `${session.workloadType}::${session.workloadName}`;
+    let summary = map.get(key);
+
+    if (!summary) {
+      summary = {
+        workloadName: session.workloadName,
+        workloadType: session.workloadType,
+        jobName: session.jobName,
+        totalSessions: 0,
+        failedCount: 0,
+        warningCount: 0,
+        successCount: 0,
+        failureRate: 0,
+        lastBackupDate: undefined,
+        gaps: [],
+        maxGapDays: 0,
+        errors: [],
+      };
+      map.set(key, summary);
+    }
+
+    summary.totalSessions++;
+
+    const statusLower = session.status.toLowerCase();
+    if (statusLower === "failed" || statusLower === "error") {
+      summary.failedCount++;
+      if (session.errorMessage && !summary.errors.includes(session.errorMessage)) {
+        summary.errors.push(session.errorMessage);
+      }
+    } else if (statusLower === "warning") {
+      summary.warningCount++;
+    } else {
+      summary.successCount++;
+    }
+
+    // Rastrear último backup
+    if (session.startTime) {
+      if (!summary.lastBackupDate || session.startTime > summary.lastBackupDate) {
+        summary.lastBackupDate = session.startTime;
+      }
+    }
+  }
+
+  // Associar gaps
+  for (const gap of gaps) {
+    const key = `${gap.workloadType}::${gap.workloadName}`;
+    let summary = map.get(key);
+
+    if (!summary) {
+      summary = {
+        workloadName: gap.workloadName,
+        workloadType: gap.workloadType,
+        jobName: gap.jobName,
+        totalSessions: 0,
+        failedCount: 0,
+        warningCount: 0,
+        successCount: 0,
+        failureRate: 0,
+        gaps: [],
+        maxGapDays: 0,
+        errors: [],
+      };
+      map.set(key, summary);
+    }
+
+    summary.gaps.push(gap);
+    if (gap.gapDays > summary.maxGapDays) {
+      summary.maxGapDays = gap.gapDays;
+    }
+  }
+
+  // Calcular taxa de falha
+  const summaries = Array.from(map.values());
+  for (const summary of summaries) {
+    if (summary.totalSessions > 0) {
+      summary.failureRate = (summary.failedCount / summary.totalSessions) * 100;
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.failureRate - a.failureRate);
+}
+
+/**
+ * Função consolidada para buscar todos os dados de falhas e lacunas.
+ * Reutiliza autenticação e endpoints existentes.
+ */
+export async function fetchFailuresData(
+  config: VeeamConfig
+): Promise<FailuresData> {
+  const { apiUrl, username, password, startDate, endDate } = config;
+
+  // Autenticar
+  const token = await getVeeamToken(apiUrl, username, password);
+
+  // Buscar workloads
+  const [vms, computers, fileShares] = await Promise.all([
+    getVeeamVMs(apiUrl, token),
+    getVeeamComputers(apiUrl, token),
+    getVeeamFileShares(apiUrl, token),
+  ]);
+
+  const allSessions: BackupSession[] = [];
+  const allGaps: BackupGap[] = [];
+
+  // ── Processar VMs ──
+  for (const vm of vms) {
+    try {
+      const vmBackups = await getVeeamVMBackups(
+        apiUrl,
+        token,
+        vm.vmUidInVbr,
+        startDate,
+        endDate
+      );
+
+      const backupDates: string[] = [];
+
+      for (const backup of vmBackups) {
+        const backupDate = (backup as any).creationTime || (backup as any).backupDate;
+
+        allSessions.push({
+          sessionId: (backup as any).uid || `vm-${vm.vmUidInVbr}-${backupDate}`,
+          jobName: vm.jobName || "N/A",
+          jobUid: vm.jobUid || "",
+          workloadName: vm.name,
+          workloadType: "vm",
+          status: (backup as any).status || "Unknown",
+          startTime: backupDate || "",
+          endTime: (backup as any).endTime,
+          durationSec: Number((backup as any).durationSec || 0),
+          errorMessage: (backup as any).failureMessage || (backup as any).errorMessage || undefined,
+          transferredBytes: Number((backup as any).sizeBytes || 0),
+        });
+
+        if (backupDate) {
+          backupDates.push(backupDate);
+        }
+      }
+
+      // Calcular lacunas
+      const vmGaps = calculateBackupGaps(
+        backupDates,
+        startDate,
+        endDate,
+        vm.name,
+        "vm",
+        vm.jobName || "N/A"
+      );
+      allGaps.push(...vmGaps);
+    } catch (error) {
+      console.warn(`Erro ao processar falhas da VM ${vm.name}:`, error);
+    }
+  }
+
+  // ── Processar Agents (computadores) ──
+  for (const comp of computers) {
+    const uid = (comp as any).computerUid || (comp as any).computerUidInVbr;
+    if (!uid) continue;
+
+    try {
+      const resp = await veeamRequest(
+        apiUrl,
+        `/api/v2.2/protectedData/computers/${uid}/backups?skip=0&limit=1000`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (resp.ok) {
+        const data = await readJsonSafely<any>(resp);
+        const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
+        const backupDates: string[] = [];
+
+        for (const backup of backups) {
+          const backupDate = backup.creationTime || backup.backupDate;
+
+          allSessions.push({
+            sessionId: backup.uid || `agent-${uid}-${backupDate}`,
+            jobName: comp.jobName || "N/A",
+            jobUid: comp.jobUid || "",
+            workloadName: comp.name,
+            workloadType: "agent",
+            status: backup.status || "Unknown",
+            startTime: backupDate || "",
+            endTime: backup.endTime,
+            durationSec: Number(backup.durationSec || 0),
+            errorMessage: backup.failureMessage || backup.errorMessage || undefined,
+            transferredBytes: Number(backup.sizeBytes || 0),
+          });
+
+          if (backupDate) {
+            backupDates.push(backupDate);
+          }
+        }
+
+        const agentGaps = calculateBackupGaps(
+          backupDates,
+          startDate,
+          endDate,
+          comp.name,
+          "agent",
+          comp.jobName || "N/A"
+        );
+        allGaps.push(...agentGaps);
+      }
+    } catch (error) {
+      console.warn(`Erro ao processar falhas do Agent ${comp.name}:`, error);
+    }
+  }
+
+  // ── Processar File Shares ──
+  for (const fs of fileShares) {
+    const uid = (fs as any).fileShareUid || (fs as any).fileShareUidInVbr;
+    if (!uid) continue;
+
+    try {
+      const resp = await veeamRequest(
+        apiUrl,
+        `/api/v2.2/protectedData/unstructuredData/fileShares/${uid}/backups?skip=0&limit=1000`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      if (resp.ok) {
+        const data = await readJsonSafely<any>(resp);
+        const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
+        const backupDates: string[] = [];
+
+        for (const backup of backups) {
+          const backupDate = backup.creationTime || backup.backupDate;
+
+          allSessions.push({
+            sessionId: backup.uid || `fs-${uid}-${backupDate}`,
+            jobName: fs.jobName || "N/A",
+            jobUid: fs.jobUid || "",
+            workloadName: fs.name,
+            workloadType: "fileshare",
+            status: backup.status || "Unknown",
+            startTime: backupDate || "",
+            endTime: backup.endTime,
+            durationSec: Number(backup.durationSec || 0),
+            errorMessage: backup.failureMessage || backup.errorMessage || undefined,
+            transferredBytes: Number(backup.sizeBytes || 0),
+          });
+
+          if (backupDate) {
+            backupDates.push(backupDate);
+          }
+        }
+
+        const fsGaps = calculateBackupGaps(
+          backupDates,
+          startDate,
+          endDate,
+          fs.name,
+          "fileshare",
+          fs.jobName || "N/A"
+        );
+        allGaps.push(...fsGaps);
+      }
+    } catch (error) {
+      console.warn(`Erro ao processar falhas do File Share ${fs.name}:`, error);
+    }
+  }
+
+  // Construir resumo por workload
+  const workloadSummary = buildWorkloadSummary(allSessions, allGaps);
+
+  // Contadores
+  const failedSessions = allSessions.filter(
+    s => s.status.toLowerCase() === "failed" || s.status.toLowerCase() === "error"
+  ).length;
+  const warningSessions = allSessions.filter(
+    s => s.status.toLowerCase() === "warning"
+  ).length;
+  const successSessions = allSessions.filter(
+    s => s.status.toLowerCase() === "success"
+  ).length;
+
+  const workloadsWithGaps = new Set(allGaps.map(g => `${g.workloadType}::${g.workloadName}`)).size;
+
+  return {
+    sessions: allSessions,
+    gaps: allGaps,
+    totalWorkloads: vms.length + computers.length + fileShares.length,
+    totalSessions: allSessions.length,
+    failedSessions,
+    warningSessions,
+    successSessions,
+    workloadsWithGaps,
+    periodStart: startDate,
+    periodEnd: endDate,
+    workloadSummary,
+  };
+}
+

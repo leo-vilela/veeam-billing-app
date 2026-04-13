@@ -4,8 +4,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
-import { VeeamConfig } from "@/types/veeam";
+import { Loader2, AlertCircle, CheckCircle2, DollarSign, ShieldAlert } from "lucide-react";
+import { VeeamConfig, AppMode } from "@/types/veeam";
 
 interface ConfigurationPageProps {
   onConfigSubmit: (config: VeeamConfig) => void;
@@ -18,7 +18,8 @@ export default function ConfigurationPage({
   isLoading = false,
   error,
 }: ConfigurationPageProps) {
-  const [formData, setFormData] = useState<VeeamConfig>({
+  const [selectedMode, setSelectedMode] = useState<AppMode>("billing");
+  const [formData, setFormData] = useState<Omit<VeeamConfig, "mode">>({
     apiUrl: "https://0.0.0.0:1239",
     username: "",
     password: "",
@@ -38,20 +39,20 @@ export default function ConfigurationPage({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    onConfigSubmit(formData);
+    onConfigSubmit({ ...formData, mode: selectedMode });
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background to-secondary/20 flex items-center justify-center p-4">
-      <Card className="w-full max-w-md shadow-lg">
+      <Card className="w-full max-w-lg shadow-lg">
         <CardHeader className="space-y-2">
-          <CardTitle className="text-2xl">Veeam Billing Dashboard</CardTitle>
+          <CardTitle className="text-2xl">Veeam Dashboard</CardTitle>
           <CardDescription>
-            Configure sua conexão com a API do Veeam ONE
+            Selecione o modo de operação e configure a conexão com a API do Veeam ONE
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />
@@ -59,6 +60,89 @@ export default function ConfigurationPage({
               </Alert>
             )}
 
+            {/* ── Seletor de Modo ── */}
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Modo de Operação</Label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => setSelectedMode("billing")}
+                  className={`
+                    relative flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center
+                    transition-all duration-200 cursor-pointer
+                    ${selectedMode === "billing"
+                      ? "border-primary bg-primary/5 shadow-md ring-2 ring-primary/20"
+                      : "border-muted hover:border-muted-foreground/30 hover:bg-muted/30"
+                    }
+                    ${isLoading ? "opacity-50 cursor-not-allowed" : ""}
+                  `}
+                >
+                  <div className={`
+                    rounded-full p-2.5
+                    ${selectedMode === "billing"
+                      ? "bg-primary/10 text-primary"
+                      : "bg-muted text-muted-foreground"
+                    }
+                  `}>
+                    <DollarSign className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className={`font-semibold text-sm ${selectedMode === "billing" ? "text-primary" : ""}`}>
+                      Billing
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Faturamento e volumetria
+                    </p>
+                  </div>
+                  {selectedMode === "billing" && (
+                    <div className="absolute top-2 right-2">
+                      <CheckCircle2 className="h-4 w-4 text-primary" />
+                    </div>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isLoading}
+                  onClick={() => setSelectedMode("failures")}
+                  className={`
+                    relative flex flex-col items-center gap-2 rounded-lg border-2 p-4 text-center
+                    transition-all duration-200 cursor-pointer
+                    ${selectedMode === "failures"
+                      ? "border-destructive bg-destructive/5 shadow-md ring-2 ring-destructive/20"
+                      : "border-muted hover:border-muted-foreground/30 hover:bg-muted/30"
+                    }
+                    ${isLoading ? "opacity-50 cursor-not-allowed" : ""}
+                  `}
+                >
+                  <div className={`
+                    rounded-full p-2.5
+                    ${selectedMode === "failures"
+                      ? "bg-destructive/10 text-destructive"
+                      : "bg-muted text-muted-foreground"
+                    }
+                  `}>
+                    <ShieldAlert className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className={`font-semibold text-sm ${selectedMode === "failures" ? "text-destructive" : ""}`}>
+                      Falhas de Backup
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Erros e lacunas por workload
+                    </p>
+                  </div>
+                  {selectedMode === "failures" && (
+                    <div className="absolute top-2 right-2">
+                      <CheckCircle2 className="h-4 w-4 text-destructive" />
+                    </div>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* ── Campos de Conexão ── */}
             <div className="space-y-2">
               <Label htmlFor="apiUrl">URL da API Veeam</Label>
               <Input
@@ -134,19 +218,26 @@ export default function ConfigurationPage({
 
             <Button
               type="submit"
-              className="w-full"
+              className={`w-full ${selectedMode === "failures" ? "bg-destructive hover:bg-destructive/90" : ""}`}
               disabled={isLoading}
               size="lg"
             >
               {isLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Conectando...
+                  {selectedMode === "billing" ? "Conectando..." : "Analisando Falhas..."}
                 </>
               ) : (
                 <>
-                  <CheckCircle2 className="mr-2 h-4 w-4" />
-                  Conectar e Buscar Dados
+                  {selectedMode === "billing" ? (
+                    <DollarSign className="mr-2 h-4 w-4" />
+                  ) : (
+                    <ShieldAlert className="mr-2 h-4 w-4" />
+                  )}
+                  {selectedMode === "billing"
+                    ? "Conectar e Buscar Dados de Billing"
+                    : "Conectar e Analisar Falhas de Backup"
+                  }
                 </>
               )}
             </Button>
