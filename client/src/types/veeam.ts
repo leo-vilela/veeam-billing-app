@@ -123,6 +123,7 @@ export interface BackupSession {
   durationSec: number;
   errorMessage?: string;
   transferredBytes?: number;
+  lastProtectedDate?: string;
 }
 
 // Lacuna (gap) de backup por workload
@@ -133,6 +134,7 @@ export interface BackupGap {
   gapEnd: string;
   gapDays: number;
   jobName: string;
+  lastBackupDate?: string;
 }
 
 // Resumo de falhas de um workload DENTRO de um job
@@ -145,6 +147,7 @@ export interface WorkloadFailureDetail {
   successCount: number;
   failureRate: number;
   lastBackupDate?: string;
+  lastProtectedDate?: string;
   gaps: BackupGap[];
   maxGapDays: number;
   errors: string[];
@@ -162,6 +165,8 @@ export interface JobFailureSummary {
   successCount: number;
   failureRate: number;
   lastRunDate?: string;
+  inconsistentWorkloads: number;
+  workloadsWithFailures: number;
   workloads: WorkloadFailureDetail[];
   gaps: BackupGap[];
   maxGapDays: number;
@@ -179,6 +184,7 @@ export interface FailuresData {
   warningSessions: number;
   successSessions: number;
   jobsWithFailures: number;
+  jobsInconsistent: number;
   jobsWithGaps: number;
   periodStart: string;
   periodEnd: string;

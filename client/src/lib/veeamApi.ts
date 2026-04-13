@@ -1013,78 +1013,55 @@ async function processBatch<T, R>(
 
 /**
  * Calcula lacunas (gaps) de backup para um workload no período selecionado.
- * Um gap é definido como um período de 1+ dias consecutivos sem nenhum backup.
+ * O gap é a diferença em dias entre o lastProtectedDate e o periodEnd.
  */
 export function calculateBackupGaps(
-  backupDates: string[],
+  lastProtectedDate: string | undefined,
   periodStart: string,
   periodEnd: string,
   workloadName: string,
   workloadType: WorkloadType,
   jobName: string
 ): BackupGap[] {
-  const start = toStartOfDay(periodStart);
-  const end = toEndOfDay(periodEnd);
-
-  // Criar set de dias com backup (formato YYYY-MM-DD)
-  const daysWithBackup = new Set<string>();
-  for (const dateStr of backupDates) {
-    const d = new Date(dateStr);
-    if (!Number.isNaN(d.getTime())) {
-      daysWithBackup.add(d.toISOString().split("T")[0]);
-    }
-  }
-
   const gaps: BackupGap[] = [];
-  let gapStart: Date | null = null;
+  const end = new Date(periodEnd + "T23:59:59Z");
+  const start = new Date(periodStart + "T00:00:00Z");
 
-  const current = new Date(start);
-  while (current <= end) {
-    const dayKey = current.toISOString().split("T")[0];
-
-    if (!daysWithBackup.has(dayKey)) {
-      if (!gapStart) {
-        gapStart = new Date(current);
-      }
-    } else {
-      if (gapStart) {
-        const gapEndDate = new Date(current);
-        gapEndDate.setDate(gapEndDate.getDate() - 1);
-        const gapDays = Math.ceil(
-          (gapEndDate.getTime() - gapStart.getTime()) / (1000 * 60 * 60 * 24)
-        ) + 1;
-
-        if (gapDays >= 1) {
-          gaps.push({
-            workloadName,
-            workloadType,
-            gapStart: gapStart.toISOString().split("T")[0],
-            gapEnd: gapEndDate.toISOString().split("T")[0],
-            gapDays,
-            jobName,
-          });
-        }
-        gapStart = null;
-      }
-    }
-
-    current.setDate(current.getDate() + 1);
-  }
-
-  // Fechar gap que vai até o final do período
-  if (gapStart) {
-    const gapDays = Math.ceil(
-      (end.getTime() - gapStart.getTime()) / (1000 * 60 * 60 * 24)
-    ) + 1;
-
+  if (!lastProtectedDate) {
+    // Sem backup registrado
+    const gapDays = Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24));
     if (gapDays >= 1) {
       gaps.push({
         workloadName,
         workloadType,
-        gapStart: gapStart.toISOString().split("T")[0],
-        gapEnd: end.toISOString().split("T")[0],
+        gapStart: periodStart,
+        gapEnd: periodEnd,
         gapDays,
         jobName,
+      });
+    }
+    return gaps;
+  }
+
+  const lastBackup = new Date(lastProtectedDate);
+  if (Number.isNaN(lastBackup.getTime())) return gaps;
+
+  // O início do gap é o dia seguinte ao último backup
+  const gapStartDate = new Date(lastBackup);
+  gapStartDate.setDate(gapStartDate.getDate() + 1);
+  const startOfGap = new Date(gapStartDate.toISOString().split("T")[0] + "T00:00:00Z");
+
+  if (startOfGap <= end) {
+    const gapDays = Math.ceil((end.getTime() - startOfGap.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+    if (gapDays >= 1) {
+      gaps.push({
+        workloadName,
+        workloadType,
+        gapStart: startOfGap.toISOString().split("T")[0],
+        gapEnd: periodEnd,
+        gapDays,
+        jobName,
+        lastBackupDate: lastBackup.toISOString(),
       });
     }
   }
@@ -1144,6 +1121,7 @@ export function buildJobSummary(
         successCount: 0,
         failureRate: 0,
         lastBackupDate: undefined,
+        lastProtectedDate: undefined,
         gaps: [],
         maxGapDays: 0,
         errors: [],
@@ -1152,6 +1130,10 @@ export function buildJobSummary(
 
     const wl = jobEntry.workloadMap.get(wlKey)!;
     wl.totalSessions++;
+
+    if (session.lastProtectedDate && !wl.lastProtectedDate) {
+      wl.lastProtectedDate = session.lastProtectedDate;
+    }
 
     const statusLower = session.status.toLowerCase();
     if (statusLower === "failed" || statusLower === "error") {
@@ -1197,6 +1179,8 @@ export function buildJobSummary(
         warningCount: 0,
         successCount: 0,
         failureRate: 0,
+        lastBackupDate: gap.lastBackupDate,
+        lastProtectedDate: undefined,
         gaps: [],
         maxGapDays: 0,
         errors: [],
@@ -1205,6 +1189,9 @@ export function buildJobSummary(
 
     const wl = jobEntry.workloadMap.get(wlKey)!;
     wl.gaps.push(gap);
+    if (gap.lastBackupDate && !wl.lastBackupDate) {
+      wl.lastBackupDate = gap.lastBackupDate;
+    }
     if (gap.gapDays > wl.maxGapDays) {
       wl.maxGapDays = gap.gapDays;
     }
@@ -1232,6 +1219,9 @@ export function buildJobSummary(
     const maxGapDays = workloads.reduce((m, w) => Math.max(m, w.maxGapDays), 0);
     const allErrors = Array.from(new Set(workloads.flatMap(w => w.errors)));
 
+    const inconsistentWorkloads = workloads.filter(w => w.failedCount > 0 || w.warningCount > 0).length;
+    const workloadsWithFailures = workloads.filter(w => w.failedCount > 0).length;
+
     result.push({
       jobName: entry.jobName,
       jobUid: entry.jobUid,
@@ -1243,6 +1233,8 @@ export function buildJobSummary(
       successCount,
       failureRate: totalSessions > 0 ? (failedCount / totalSessions) * 100 : 0,
       lastRunDate: entry.lastRunDate,
+      inconsistentWorkloads,
+      workloadsWithFailures,
       workloads: workloads.sort((a, b) => b.failureRate - a.failureRate),
       gaps: allGapsJob,
       maxGapDays,
@@ -1310,6 +1302,7 @@ export async function fetchFailuresData(
         durationSec: Number((backup as any).durationSec || 0),
         errorMessage: (backup as any).failureMessage || (backup as any).errorMessage || undefined,
         transferredBytes: Number((backup as any).sizeBytes || 0),
+        lastProtectedDate: vm.lastProtectedDate,
       });
 
       if (backupDate) {
@@ -1318,7 +1311,7 @@ export async function fetchFailuresData(
     }
 
     const vmGaps = calculateBackupGaps(
-      backupDates,
+      vm.lastProtectedDate,
       startDate,
       endDate,
       vm.name,
@@ -1372,6 +1365,7 @@ export async function fetchFailuresData(
           durationSec: Number(backup.durationSec || 0),
           errorMessage: backup.failureMessage || backup.errorMessage || undefined,
           transferredBytes: Number(backup.sizeBytes || 0),
+          lastProtectedDate: comp.lastProtectedDate,
         });
 
         if (backupDate) {
@@ -1380,7 +1374,7 @@ export async function fetchFailuresData(
       }
 
       const agentGaps = calculateBackupGaps(
-        backupDates,
+        comp.lastProtectedDate,
         startDate,
         endDate,
         comp.name,
@@ -1435,6 +1429,7 @@ export async function fetchFailuresData(
           durationSec: Number(backup.durationSec || 0),
           errorMessage: backup.failureMessage || backup.errorMessage || undefined,
           transferredBytes: Number(backup.sizeBytes || 0),
+          lastProtectedDate: fs.lastProtectedDate,
         });
 
         if (backupDate) {
@@ -1443,7 +1438,7 @@ export async function fetchFailuresData(
       }
 
       const fsGaps = calculateBackupGaps(
-        backupDates,
+        fs.lastProtectedDate,
         startDate,
         endDate,
         fs.name,
@@ -1475,18 +1470,20 @@ export async function fetchFailuresData(
   }
 
   const jobsWithFailures = jobSummary.filter(j => j.failedCount > 0).length;
+  const jobsInconsistent = jobSummary.filter(j => j.inconsistentWorkloads > 0).length;
   const jobsWithGaps = jobSummary.filter(j => j.gaps.length > 0).length;
 
   return {
     sessions: allSessions,
     gaps: allGaps,
-    totalJobs: jobSummary.length,
+    totalJobs: jobs.length > 0 ? jobs.length : jobSummary.length,
     totalWorkloads: vms.length + computers.length + fileShares.length,
     totalSessions: allSessions.length,
     failedSessions,
     warningSessions,
     successSessions,
     jobsWithFailures,
+    jobsInconsistent,
     jobsWithGaps,
     periodStart: startDate,
     periodEnd: endDate,

@@ -52,7 +52,11 @@ const WORKLOAD_LABELS: Record<string, string> = {
   fileshare: "File Share",
 };
 
-function getStatusBadge(status: string) {
+function getStatusBadge(status: string, inconsistent?: boolean) {
+  if (inconsistent) {
+    return <Badge className="bg-orange-500/10 text-orange-600 border-orange-200 hover:bg-orange-500/20">Inconsistente</Badge>;
+  }
+
   const s = status.toLowerCase();
   if (s === "success") {
     return <Badge className="bg-emerald-500/10 text-emerald-600 border-emerald-200 hover:bg-emerald-500/20">{status}</Badge>;
@@ -157,19 +161,19 @@ export default function FailuresDashboard({
     csv += `Jobs com Lacunas,${failuresData.jobsWithGaps}\n\n`;
 
     csv += "Falhas por Job\n";
-    csv += "Job,Status,Workloads,Total Sessões,Falhas,Avisos,Sucessos,Taxa de Falha (%),Maior Lacuna (dias),Erros\n";
+    csv += "Job,Status,Workloads,Total Sessões,Falhas,Avisos,Sucessos,Taxa de Falha (%),Maior Lacuna (dias),Último Backup,Erros\n";
     for (const j of failuresData.jobSummary) {
-      csv += `"${j.jobName}",${j.jobStatus},${j.totalWorkloads},${j.totalSessions},${j.failedCount},${j.warningCount},${j.successCount},${j.failureRate.toFixed(1)},${j.maxGapDays},"${j.errors.join('; ')}"\n`;
+      csv += `"${j.jobName}",${j.jobStatus},${j.totalWorkloads},${j.totalSessions},${j.failedCount},${j.warningCount},${j.successCount},${j.failureRate.toFixed(1)},${j.maxGapDays},${j.lastRunDate ? new Date(j.lastRunDate).toLocaleString() : ""},"${j.errors.join('; ')}"\n`;
 
       for (const w of j.workloads) {
-        csv += `"  → ${w.workloadName}",${w.workloadType},,${w.totalSessions},${w.failedCount},${w.warningCount},${w.successCount},${w.failureRate.toFixed(1)},${w.maxGapDays},"${w.errors.join('; ')}"\n`;
+        csv += `"  → ${w.workloadName}",${w.workloadType},,${w.totalSessions},${w.failedCount},${w.warningCount},${w.successCount},${w.failureRate.toFixed(1)},${w.maxGapDays},${w.lastProtectedDate ? new Date(w.lastProtectedDate).toLocaleString() : ""},"${w.errors.join('; ')}"\n`;
       }
     }
 
     csv += "\nLacunas de Backup\n";
-    csv += "Job,Workload,Tipo,Início da Lacuna,Fim da Lacuna,Dias sem Backup\n";
+    csv += "Job,Workload,Tipo,Início da Lacuna,Fim da Lacuna,Último Backup,Dias sem Backup\n";
     for (const g of failuresData.gaps) {
-      csv += `"${g.jobName}","${g.workloadName}",${g.workloadType},${g.gapStart},${g.gapEnd},${g.gapDays}\n`;
+      csv += `"${g.jobName}","${g.workloadName}",${g.workloadType},${g.gapStart},${g.gapEnd},${g.lastBackupDate ? new Date(g.lastBackupDate).toLocaleString() : ""},${g.gapDays}\n`;
     }
 
     const element = document.createElement("a");
@@ -229,7 +233,7 @@ export default function FailuresDashboard({
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Jobs Analisados
+                Jobs no Período
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -257,12 +261,12 @@ export default function FailuresDashboard({
           <Card className="border-red-200 bg-red-50/30">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-red-600">
-                Jobs com Falha
+                Jobs Inconsistentes
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex items-center justify-between">
-                <div className="text-3xl font-bold text-red-600">{failuresData.jobsWithFailures}</div>
+                <div className="text-3xl font-bold text-red-600">{failuresData.jobsInconsistent}</div>
                 <XCircle className="h-8 w-8 text-red-400" />
               </div>
             </CardContent>
@@ -473,6 +477,7 @@ export default function FailuresDashboard({
                         <th className="text-right py-2 px-2">Avisos</th>
                         <th className="text-right py-2 px-2">Taxa Falha</th>
                         <th className="text-right py-2 px-2">Maior Lacuna</th>
+                        <th className="text-right py-2 px-2">Último Backup</th>
                         <th className="text-left py-2 px-2">Erros</th>
                       </tr>
                     </thead>
@@ -507,12 +512,15 @@ export default function FailuresDashboard({
                                     {job.jobName}
                                   </span>
                                 </td>
-                                <td className="py-2 px-2">{getStatusBadge(job.jobStatus)}</td>
+                                <td className="py-2 px-2">{getStatusBadge(job.jobStatus, job.inconsistentWorkloads > 0)}</td>
                                 <td className="py-2 px-2 text-right">{job.totalWorkloads}</td>
                                 <td className="py-2 px-2 text-right">{job.totalSessions}</td>
                                 <td className="py-2 px-2 text-right">
                                   {job.failedCount > 0 ? (
-                                    <span className="text-red-600 font-bold">{job.failedCount}</span>
+                                    <span className="flex flex-col items-end">
+                                      <span className="text-red-600 font-bold">{job.failedCount}</span>
+                                      <Badge variant="outline" className="text-[10px] mt-0.5 bg-red-50 text-red-600 border-red-200 uppercase">{job.workloadsWithFailures} WLs</Badge>
+                                    </span>
                                   ) : (
                                     <span className="text-muted-foreground">0</span>
                                   )}
@@ -535,6 +543,9 @@ export default function FailuresDashboard({
                                   ) : (
                                     <span className="text-muted-foreground">—</span>
                                   )}
+                                </td>
+                                <td className="py-2 px-2 text-right text-xs">
+                                  {job.lastRunDate ? new Date(job.lastRunDate).toLocaleString() : "—"}
                                 </td>
                                 <td className="py-2 px-2 text-xs max-w-[180px] truncate" title={job.errors.join("; ")}>
                                   {job.errors.length > 0 ? (
@@ -579,6 +590,9 @@ export default function FailuresDashboard({
                                     {wl.maxGapDays > 0 ? (
                                       <span className="text-violet-600">{wl.maxGapDays}d</span>
                                     ) : "—"}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right text-xs">
+                                    {wl.lastProtectedDate ? new Date(wl.lastProtectedDate).toLocaleString() : "—"}
                                   </td>
                                   <td className="py-1.5 px-2 text-xs max-w-[180px] truncate" title={wl.errors.join("; ")}>
                                     {wl.errors.length > 0 ? (
@@ -650,6 +664,7 @@ export default function FailuresDashboard({
                         <th className="text-left py-2 px-2">Tipo</th>
                         <th className="text-left py-2 px-2">Início</th>
                         <th className="text-left py-2 px-2">Fim</th>
+                        <th className="text-left py-2 px-2">Último Backup</th>
                         <th className="text-right py-2 px-2">Dias sem Backup</th>
                       </tr>
                     </thead>
@@ -684,6 +699,9 @@ export default function FailuresDashboard({
                               </td>
                               <td className="py-2 px-2">{gap.gapStart}</td>
                               <td className="py-2 px-2">{gap.gapEnd}</td>
+                              <td className="py-2 px-2 text-xs">
+                                {gap.lastBackupDate ? new Date(gap.lastBackupDate).toLocaleString() : "—"}
+                              </td>
                               <td className="py-2 px-2 text-right">
                                 <span className={`font-bold ${gap.gapDays >= 7 ? "text-red-600" : gap.gapDays >= 3 ? "text-amber-600" : "text-violet-600"}`}>
                                   {gap.gapDays}
