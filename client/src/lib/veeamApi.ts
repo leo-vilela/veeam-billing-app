@@ -1247,7 +1247,8 @@ export function buildJobSummary(
 
 /**
  * Função consolidada para buscar todos os dados de falhas e lacunas.
- * Agrupado por JOB (= cliente). Reutiliza autenticação e endpoints existentes.
+ * Agrupado por JOB (= cliente). Usa status real dos Jobs.
+ * Filtra workloads apenas pelos jobNames do período selecionado.
  */
 export async function fetchFailuresData(
   config: VeeamConfig
@@ -1258,9 +1259,7 @@ export async function fetchFailuresData(
   const token = await getVeeamToken(apiUrl, username, password);
 
   // Buscar jobs e workloads em paralelo
-  let jobs: VeeamJob[] = [];
-
-  const [jobsResult, vms, computers, fileShares] = await Promise.all([
+  const [jobs, allVMs, allComputers, allFileShares] = await Promise.all([
     getVeeamJobs(apiUrl, token, startDate, endDate).catch(() => {
       console.warn("Não foi possível buscar jobs. Continuando sem dados de job.");
       return [] as VeeamJob[];
@@ -1269,47 +1268,36 @@ export async function fetchFailuresData(
     getVeeamComputers(apiUrl, token),
     getVeeamFileShares(apiUrl, token),
   ]);
-  jobs = jobsResult;
 
-  const allSessions: BackupSession[] = [];
+  // ── Sessões reais a partir dos Jobs (status correto) ──
+  const allSessions: BackupSession[] = jobs.map(job => ({
+    sessionId: job.vmBackupJobUid,
+    jobName: job.name,
+    jobUid: job.vmBackupJobUid,
+    workloadName: job.name,
+    workloadType: "vm" as WorkloadType,
+    status: job.status || "Unknown",
+    startTime: job.lastRun || "",
+    endTime: "",
+    durationSec: job.lastRunDurationSec || 0,
+    errorMessage: (job.status || "").toLowerCase() === "failed"
+      ? `Job "${job.name}" falhou na última execução`
+      : undefined,
+    transferredBytes: job.lastTransferredDataBytes || 0,
+  }));
+
+  // ── Filtrar workloads apenas pelos Jobs do período ──
+  const jobNameSet = new Set(jobs.map(j => j.name));
+
+  const vms = allVMs.filter(vm => jobNameSet.has(vm.jobName));
+  const computers = allComputers.filter(c => jobNameSet.has(c.jobName || ""));
+  const fileShares = allFileShares.filter(f => jobNameSet.has(f.jobName || ""));
+
+  // ── Calcular gaps apenas para workloads do período ──
   const allGaps: BackupGap[] = [];
 
-  // ── Processar VMs (em lotes paralelos) ──
-  const vmResults = await processBatch(vms, async (vm) => {
-    const vmBackups = await getVeeamVMBackups(
-      apiUrl,
-      token,
-      vm.vmUidInVbr,
-      startDate,
-      endDate
-    );
-
-    const sessions: BackupSession[] = [];
-    const backupDates: string[] = [];
-
-    for (const backup of vmBackups) {
-      const backupDate = (backup as any).creationTime || (backup as any).backupDate;
-
-      sessions.push({
-        sessionId: (backup as any).uid || `vm-${vm.vmUidInVbr}-${backupDate}`,
-        jobName: vm.jobName || "N/A",
-        jobUid: vm.jobUid || "",
-        workloadName: vm.name,
-        workloadType: "vm",
-        status: (backup as any).status || "Unknown",
-        startTime: backupDate || "",
-        endTime: (backup as any).endTime,
-        durationSec: Number((backup as any).durationSec || 0),
-        errorMessage: (backup as any).failureMessage || (backup as any).errorMessage || undefined,
-        transferredBytes: Number((backup as any).sizeBytes || 0),
-        lastProtectedDate: vm.lastProtectedDate,
-      });
-
-      if (backupDate) {
-        backupDates.push(backupDate);
-      }
-    }
-
+  // Gaps de VMs
+  for (const vm of vms) {
     const vmGaps = calculateBackupGaps(
       vm.lastProtectedDate,
       startDate,
@@ -1318,147 +1306,39 @@ export async function fetchFailuresData(
       "vm",
       vm.jobName || "N/A"
     );
-
-    return { sessions, gaps: vmGaps };
-  }, 5);
-
-  for (const result of vmResults) {
-    allSessions.push(...result.sessions);
-    allGaps.push(...result.gaps);
+    allGaps.push(...vmGaps);
   }
 
-  // ── Processar Agents (em lotes paralelos) ──
-  const agentResults = await processBatch(
-    computers.filter(comp => (comp as any).computerUid || (comp as any).computerUidInVbr),
-    async (comp) => {
-      const uid = (comp as any).computerUid || (comp as any).computerUidInVbr;
-      const resp = await veeamRequest(
-        apiUrl,
-        `/api/v2.2/protectedData/computers/${uid}/backups?skip=0&limit=1000`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!resp.ok) return { sessions: [] as BackupSession[], gaps: [] as BackupGap[] };
-
-      const data = await readJsonSafely<any>(resp);
-      const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
-      const sessions: BackupSession[] = [];
-      const backupDates: string[] = [];
-
-      for (const backup of backups) {
-        const backupDate = backup.creationTime || backup.backupDate;
-
-        sessions.push({
-          sessionId: backup.uid || `agent-${uid}-${backupDate}`,
-          jobName: comp.jobName || "N/A",
-          jobUid: comp.jobUid || "",
-          workloadName: comp.name,
-          workloadType: "agent",
-          status: backup.status || "Unknown",
-          startTime: backupDate || "",
-          endTime: backup.endTime,
-          durationSec: Number(backup.durationSec || 0),
-          errorMessage: backup.failureMessage || backup.errorMessage || undefined,
-          transferredBytes: Number(backup.sizeBytes || 0),
-          lastProtectedDate: comp.lastProtectedDate,
-        });
-
-        if (backupDate) {
-          backupDates.push(backupDate);
-        }
-      }
-
-      const agentGaps = calculateBackupGaps(
-        comp.lastProtectedDate,
-        startDate,
-        endDate,
-        comp.name,
-        "agent",
-        comp.jobName || "N/A"
-      );
-
-      return { sessions, gaps: agentGaps };
-    }, 5
-  );
-
-  for (const result of agentResults) {
-    allSessions.push(...result.sessions);
-    allGaps.push(...result.gaps);
+  // Gaps de Agents
+  for (const comp of computers) {
+    const agentGaps = calculateBackupGaps(
+      comp.lastProtectedDate,
+      startDate,
+      endDate,
+      comp.name,
+      "agent",
+      comp.jobName || "N/A"
+    );
+    allGaps.push(...agentGaps);
   }
 
-  // ── Processar File Shares (em lotes paralelos) ──
-  const fsResults = await processBatch(
-    fileShares.filter(fs => (fs as any).fileShareUid || (fs as any).fileShareUidInVbr),
-    async (fs) => {
-      const uid = (fs as any).fileShareUid || (fs as any).fileShareUidInVbr;
-      const resp = await veeamRequest(
-        apiUrl,
-        `/api/v2.2/protectedData/unstructuredData/fileShares/${uid}/backups?skip=0&limit=1000`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!resp.ok) return { sessions: [] as BackupSession[], gaps: [] as BackupGap[] };
-
-      const data = await readJsonSafely<any>(resp);
-      const backups: any[] = filterBackupsByDate(data.items || [], startDate, endDate);
-      const sessions: BackupSession[] = [];
-      const backupDates: string[] = [];
-
-      for (const backup of backups) {
-        const backupDate = backup.creationTime || backup.backupDate;
-
-        sessions.push({
-          sessionId: backup.uid || `fs-${uid}-${backupDate}`,
-          jobName: fs.jobName || "N/A",
-          jobUid: fs.jobUid || "",
-          workloadName: fs.name,
-          workloadType: "fileshare",
-          status: backup.status || "Unknown",
-          startTime: backupDate || "",
-          endTime: backup.endTime,
-          durationSec: Number(backup.durationSec || 0),
-          errorMessage: backup.failureMessage || backup.errorMessage || undefined,
-          transferredBytes: Number(backup.sizeBytes || 0),
-          lastProtectedDate: fs.lastProtectedDate,
-        });
-
-        if (backupDate) {
-          backupDates.push(backupDate);
-        }
-      }
-
-      const fsGaps = calculateBackupGaps(
-        fs.lastProtectedDate,
-        startDate,
-        endDate,
-        fs.name,
-        "fileshare",
-        fs.jobName || "N/A"
-      );
-
-      return { sessions, gaps: fsGaps };
-    }, 5
-  );
-
-  for (const result of fsResults) {
-    allSessions.push(...result.sessions);
-    allGaps.push(...result.gaps);
+  // Gaps de File Shares
+  for (const fs of fileShares) {
+    const fsGaps = calculateBackupGaps(
+      fs.lastProtectedDate,
+      startDate,
+      endDate,
+      fs.name,
+      "fileshare",
+      fs.jobName || "N/A"
+    );
+    allGaps.push(...fsGaps);
   }
 
   // Construir resumo por JOB
   const jobSummary = buildJobSummary(allSessions, allGaps, jobs);
 
-  // Contadores (passagem única)
+  // Contadores diretos dos jobs (status real)
   let failedSessions = 0;
   let warningSessions = 0;
   let successSessions = 0;
@@ -1476,7 +1356,7 @@ export async function fetchFailuresData(
   return {
     sessions: allSessions,
     gaps: allGaps,
-    totalJobs: jobs.length > 0 ? jobs.length : jobSummary.length,
+    totalJobs: jobs.length,
     totalWorkloads: vms.length + computers.length + fileShares.length,
     totalSessions: allSessions.length,
     failedSessions,
@@ -1490,5 +1370,3 @@ export async function fetchFailuresData(
     jobSummary,
   };
 }
-
-

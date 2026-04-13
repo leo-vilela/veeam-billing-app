@@ -247,7 +247,7 @@ export default function FailuresDashboard({
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm font-medium text-muted-foreground">
-                Total de Sessões
+                Total de Execuções
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -484,7 +484,7 @@ export default function FailuresDashboard({
                     <tbody>
                       {failuresData.jobSummary.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="py-8 text-center text-muted-foreground">
+                          <td colSpan={10} className="py-8 text-center text-muted-foreground">
                             Nenhum job encontrado.
                           </td>
                         </tr>
@@ -723,7 +723,7 @@ export default function FailuresDashboard({
               <CardHeader>
                 <CardTitle>Todas as Sessões de Backup</CardTitle>
                 <CardDescription>
-                  {failuresData.totalSessions} sessões no período — mostrando as 200 mais recentes
+                  {failuresData.totalSessions} execuções no período — mostrando as 200 mais recentes
                 </CardDescription>
               </CardHeader>
               <CardContent>
