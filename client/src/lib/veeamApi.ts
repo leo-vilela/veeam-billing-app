@@ -1380,7 +1380,7 @@ export async function fetchFailuresData(
         });
 
         // ── Calcular Gap deste workload ──
-        const workloadLastRun = jobLastRunMap.get(job.name) || w.lastProt;
+        const workloadLastRun = w.lastProt || jobLastRunMap.get(job.name);
         allGaps.push(...calculateBackupGaps(workloadLastRun, startDate, endDate, w.name, w.type, job.name));
       }
     }
@@ -1451,19 +1451,26 @@ export async function fetchWeeklyBackupData(
     allDates.push(d.toISOString().split("T")[0]);
   }
 
-  // Buscar jobs e workloads
-  const [jobs, allVMs] = await Promise.all([
+  // Buscar jobs e workloads globais
+  const [jobs, allVMs, allComputers, allFileShares] = await Promise.all([
     getVeeamJobs(apiUrl, token).catch(() => [] as VeeamJob[]),
     getVeeamVMs(apiUrl, token),
+    getVeeamComputers(apiUrl, token),
+    getVeeamFileShares(apiUrl, token),
   ]);
 
-  // Mapa jobName -> VMs
-  const jobVMsMap = new Map<string, VeeamVM[]>();
-  for (const vm of allVMs) {
-    if (!vm.jobName) continue;
-    if (!jobVMsMap.has(vm.jobName)) jobVMsMap.set(vm.jobName, []);
-    jobVMsMap.get(vm.jobName)!.push(vm);
-  }
+  // Mapa jobName -> Workloads
+  const jobWorkloadsMap = new Map<string, Array<{ isVm: boolean, uid: string, lastProt?: string }>>();
+  
+  const addWl = (jobName: string, w: { isVm: boolean, uid: string, lastProt?: string }) => {
+    if (!jobName) return;
+    if (!jobWorkloadsMap.has(jobName)) jobWorkloadsMap.set(jobName, []);
+    jobWorkloadsMap.get(jobName)!.push(w);
+  };
+
+  allVMs.forEach(vm => addWl(vm.jobName, { isVm: true, uid: vm.vmUidInVbr, lastProt: vm.lastProtectedDate }));
+  allComputers.forEach(c => addWl(c.jobName || "", { isVm: false, uid: "", lastProt: c.lastProtectedDate }));
+  allFileShares.forEach(f => addWl(f.jobName || "", { isVm: false, uid: "", lastProt: (f as any).lastProtectedDate }));
 
   // Para cada job, buscar restore points das VMs e inferir datas
   const weeklyRows: WeeklyJobRow[] = [];
@@ -1475,46 +1482,55 @@ export async function fetchWeeklyBackupData(
     const batchResults = await Promise.all(
       batch.map(async (job) => {
         const jobUid = job.vmBackupJobUid || job.agentBackupJobUid || "";
-        const vmsForJob = jobVMsMap.get(job.name) || [];
+        const workloadsForJob = jobWorkloadsMap.get(job.name) || [];
 
-        // Coletar datas com backup (union de todos os RPs de todas VMs do job)
+        // Coletar datas com backup (union de todos os RPs de todos workloads)
         const backupDatesSet = new Set<string>();
+        let hasVm = false;
 
-        for (const vm of vmsForJob) {
-          try {
-            const bkResp = await veeamRequest(
-              apiUrl,
-              `/api/v2.2/protectedData/virtualMachines/${vm.vmUidInVbr}/backups?skip=0&limit=10`,
-              {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                  "Content-Type": "application/json",
-                },
-              }
-            );
-            if (bkResp.ok) {
-              const bkData = await readJsonSafely<any>(bkResp);
-              for (const bk of bkData.items || []) {
-                const rpCount = Number(bk.restorePoints) || 0;
-                const lastProt = bk.lastProtectedDate;
-                if (lastProt && rpCount > 0) {
-                  // Inferir datas retroativas a partir de lastProtectedDate
-                  const lpDate = new Date(lastProt);
-                  for (let d = 0; d < rpCount; d++) {
-                    const rpDate = new Date(lpDate);
-                    rpDate.setDate(rpDate.getDate() - d);
-                    backupDatesSet.add(rpDate.toISOString().split("T")[0]);
+        for (const w of workloadsForJob) {
+          if (w.isVm && w.uid) {
+            hasVm = true;
+            try {
+              const bkResp = await veeamRequest(
+                apiUrl,
+                `/api/v2.2/protectedData/virtualMachines/${w.uid}/backups?skip=0&limit=10`,
+                {
+                  headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                  },
+                }
+              );
+              if (bkResp.ok) {
+                const bkData = await readJsonSafely<any>(bkResp);
+                for (const bk of bkData.items || []) {
+                  const rpCount = Number(bk.restorePoints) || 0;
+                  const lastProt = bk.lastProtectedDate;
+                  if (lastProt && rpCount > 0) {
+                    // Inferir datas retroativas a partir de lastProtectedDate
+                    const lpDate = new Date(lastProt);
+                    for (let d = 0; d < rpCount; d++) {
+                      const rpDate = new Date(lpDate);
+                      rpDate.setDate(rpDate.getDate() - d);
+                      backupDatesSet.add(rpDate.toISOString().split("T")[0]);
+                    }
                   }
                 }
               }
+            } catch {
+              // Ignorar erros individuais
             }
-          } catch {
-            // Ignorar VMs com erro
+          }
+          
+          // Se tiver lastProtectedDate explícito, garantir sua presença (vital para NAS/Agents)
+          if (w.lastProt) {
+            backupDatesSet.add(new Date(w.lastProt).toISOString().split("T")[0]);
           }
         }
 
-        // Se não temos VMs, usar lastRun do job como fallback
-        if (vmsForJob.length === 0 && job.lastRun) {
+        // Se não temos VMs nem RPs profundos, usar lastRun do job como fallback de 1 dia
+        if (!hasVm && job.lastRun) {
           const lastRunDate = new Date(job.lastRun).toISOString().split("T")[0];
           backupDatesSet.add(lastRunDate);
         }
@@ -1536,7 +1552,7 @@ export async function fetchWeeklyBackupData(
         return {
           jobName: job.name,
           jobStatus: job.status || "Unknown",
-          totalWorkloads: vmsForJob.length,
+          totalWorkloads: workloadsForJob.length,
           days,
           successDays,
           missingDays,
