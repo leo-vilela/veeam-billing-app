@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: veeam-billing-app
+  labels:
+    app: veeam-billing-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: veeam-billing-app
+  template:
+    metadata:
+      labels:
+        app: veeam-billing-app
+    spec:
+      containers:
+        - name: veeam-billing-app
+          # Substituir pela imagem do seu registry
+          image: IMAGE_REGISTRY/veeam-billing-app:latest
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: veeam-billing-app
+  labels:
+    app: veeam-billing-app
+spec:
+  selector:
+    app: veeam-billing-app
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: veeam-billing-app
+  labels:
+    app: veeam-billing-app
+spec:
+  # Substituir pelo hostname desejado (ou remover para auto-geração)
+  # host: veeam-billing.apps.exemplo.com
+  to:
+    kind: Service
+    name: veeam-billing-app
+    weight: 100
+  port:
+    targetPort: 3000
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
